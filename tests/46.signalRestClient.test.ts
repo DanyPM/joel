@@ -1,0 +1,140 @@
+import { describe, it, expect, vi, afterEach } from "vitest";
+import {
+  parseSignalFrame,
+  SignalRestClient,
+  type WebSocketLike
+} from "../utils/signalRestClient.ts";
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("parseSignalFrame", () => {
+  it("returns the envelope for a data message", () => {
+    const frame = JSON.stringify({
+      envelope: { sourceNumber: "+33600000000", dataMessage: { message: "hi" } }
+    });
+    const res = parseSignalFrame(frame);
+    expect(res?.envelope.dataMessage?.message).toBe("hi");
+  });
+
+  it("ignores frames without a dataMessage (receipts/typing/sync)", () => {
+    const frame = JSON.stringify({
+      envelope: { sourceNumber: "+33600000000", receiptMessage: {} }
+    });
+    expect(parseSignalFrame(frame)).toBeNull();
+  });
+
+  it("ignores non-string and non-JSON input", () => {
+    expect(parseSignalFrame(123)).toBeNull();
+    expect(parseSignalFrame("not json")).toBeNull();
+  });
+});
+
+// Minimal fake WebSocket implementing WebSocketLike + event dispatch.
+class FakeWS implements WebSocketLike {
+  handlers: Record<string, ((ev: any) => void)[]> = {};
+  static last: FakeWS;
+  closed = false;
+  constructor(public url: string) {
+    FakeWS.last = this;
+  }
+  addEventListener(type: string, cb: (ev: any) => void) {
+    (this.handlers[type] ??= []).push(cb);
+  }
+  emit(type: string, ev?: any) {
+    (this.handlers[type] ?? []).forEach((h) => h(ev));
+  }
+  close() {
+    this.closed = true;
+    this.emit("close");
+  }
+}
+
+describe("SignalRestClient.connect / message", () => {
+  it("opens a ws:// URL derived from an http:// api url and emits messages", async () => {
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      (url) => new FakeWS(url)
+    );
+    const received: unknown[] = [];
+    client.on("message", (m) => received.push(m));
+
+    const connected = client.connect();
+    FakeWS.last.emit("open");
+    await connected;
+
+    expect(FakeWS.last.url).toBe("ws://signal-api:8080/v1/receive/+33111111111");
+
+    FakeWS.last.emit("message", {
+      data: JSON.stringify({
+        envelope: {
+          sourceNumber: "+33600000000",
+          dataMessage: { message: "yo" }
+        }
+      })
+    });
+    expect(received).toHaveLength(1);
+
+    client.disconnect();
+    expect(FakeWS.last.closed).toBe(true);
+  });
+
+  it("reconnects after an unexpected close", () => {
+    const urls: FakeWS[] = [];
+    const client = new SignalRestClient(
+      "https://signal-api:8080",
+      "+33111111111",
+      (url) => {
+        const ws = new FakeWS(url);
+        urls.push(ws);
+        return ws;
+      }
+    );
+    vi.useFakeTimers();
+    void client.connect();
+    urls[0].emit("open");
+    // simulate a drop
+    urls[0].emit("close");
+    vi.runOnlyPendingTimers();
+    expect(urls.length).toBe(2); // a new socket was opened
+    expect(urls[0].url).toBe("wss://signal-api:8080/v1/receive/+33111111111");
+    client.disconnect();
+    vi.useRealTimers();
+  });
+});
+
+describe("SignalRestClient.sendMessage", () => {
+  it("POSTs to /v2/send with number, recipients and message", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 201 }));
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      () => new FakeWS("x")
+    );
+    await client.sendMessage("+33600000000", "hello");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://signal-api:8080/v2/send");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      number: "+33111111111",
+      recipients: ["+33600000000"],
+      message: "hello"
+    });
+  });
+
+  it("throws on a non-2xx response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("bad number", { status: 400, statusText: "Bad Request" })
+    );
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      () => new FakeWS("x")
+    );
+    await expect(client.sendMessage("+33600000000", "hi")).rejects.toThrow(
+      /send failed: 400/
+    );
+  });
+});
