@@ -53,7 +53,6 @@ const ENV_KEYS = [
   "WHATSAPP_USER_TOKEN",
   "WHATSAPP_APP_SECRET",
   "WHATSAPP_VERIFY_TOKEN",
-  "SIGNAL_BAT_PATH",
   "SIGNAL_PHONE_NUMBER",
   "TELEGRAM_BOT_TOKEN",
   "MATRIX_HOME_URL",
@@ -115,8 +114,7 @@ describe("loadAllMessageApps — WhatsApp", () => {
 });
 
 describe("loadAllMessageApps — Signal", () => {
-  it("enables Signal and connects when all env vars are set", async () => {
-    process.env.SIGNAL_BAT_PATH = "/bin/signal";
+  it("enables Signal and connects when the phone number is set", async () => {
     process.env.SIGNAL_PHONE_NUMBER = "+33600000000";
 
     const loadAllMessageApps = await loadModule(true);
@@ -125,18 +123,18 @@ describe("loadAllMessageApps — Signal", () => {
     ]);
 
     expect(messageApps).toEqual(["Signal"]);
-    expect(SignalCliMock).toHaveBeenCalledWith("/bin/signal", "+33600000000");
+    // Phone number only: the SDK resolves its bundled signal-cli binary.
+    expect(SignalCliMock).toHaveBeenCalledWith("+33600000000");
     expect(signalConnect).toHaveBeenCalledTimes(1);
     expect(messageAppOptions.signalCli).toBeDefined();
   });
 
-  it("throws when Signal env vars are partially set", async () => {
-    process.env.SIGNAL_BAT_PATH = "/bin/signal"; // phone missing
-
+  it("skips Signal when the phone number is unset", async () => {
     const loadAllMessageApps = await loadModule(true);
-    await expect(loadAllMessageApps(["Signal"])).rejects.toThrow(
-      "Signal env vars partially set"
-    );
+    const { messageApps } = await loadAllMessageApps(["Signal"]);
+
+    expect(messageApps).toEqual([]);
+    expect(SignalCliMock).not.toHaveBeenCalled();
   });
 });
 
@@ -239,7 +237,6 @@ describe("loadAllMessageApps — selection & empty env", () => {
 
   it("enables all configured apps when messageApps is undefined", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "12345:abc";
-    process.env.SIGNAL_BAT_PATH = "/bin/signal";
     process.env.SIGNAL_PHONE_NUMBER = "+33600000000";
 
     const loadAllMessageApps = await loadModule(true);

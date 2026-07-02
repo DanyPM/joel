@@ -3,7 +3,6 @@ import { SignalCli } from "signal-sdk";
 
 const {
   SIGNAL_PHONE_NUMBER,
-  SIGNAL_BAT_PATH,
   TEST_TARGET_PHONE_NUMBER,
   SIGNAL_DEVICE_NAME
 } = process.env;
@@ -11,9 +10,6 @@ const {
 async function connectDevice() {
   if (SIGNAL_PHONE_NUMBER === undefined) {
     throw new Error("SIGNAL_PHONE_NUMBER env variable not set");
-  }
-  if (SIGNAL_BAT_PATH === undefined) {
-    throw new Error("SIGNAL_BAT_PATH env variable not set");
   }
   if (TEST_TARGET_PHONE_NUMBER === undefined) {
     throw new Error("TEST_TARGET_PHONE_NUMBER env variable not set");
@@ -28,8 +24,9 @@ async function connectDevice() {
   console.log(`Device name: ${SIGNAL_DEVICE_NAME}`);
   console.log("Generating QR code for device linking...\n");
 
-  // Initialize the SDK without an account (for linking)
-  const signalCli = new SignalCli(SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER);
+  // Initialize the SDK for linking; the bundled signal-cli binary is resolved
+  // automatically.
+  const signalCli = new SignalCli(SIGNAL_PHONE_NUMBER);
 
   try {
     // Start device linking with QR code output to console

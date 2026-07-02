@@ -7,15 +7,11 @@ import { startDailyNotificationJobs } from "../notifications/notificationSchedul
 import { logError } from "../utils/debugLogger.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 
-const { SIGNAL_PHONE_NUMBER, SIGNAL_BAT_PATH } = process.env;
+const { SIGNAL_PHONE_NUMBER } = process.env;
 
 if (SIGNAL_PHONE_NUMBER === undefined) {
   console.log("Signal: env is not set, bot did not start \u{1F6A9}");
   process.exit(0);
-}
-
-if (SIGNAL_BAT_PATH === undefined) {
-  throw new Error("SIGNAL_BAT_PATH env variable not set");
 }
 
 interface ISignalMessage {
@@ -29,8 +25,9 @@ interface ISignalMessage {
 }
 await (async () => {
   try {
-    // Initialize SignalCli with phone number
-    const signalCli = new SignalCli(SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER);
+    // Initialize SignalCli with phone number; the SDK resolves its bundled
+    // signal-cli binary automatically.
+    const signalCli = new SignalCli(SIGNAL_PHONE_NUMBER);
 
     // Register stopper
     let shuttingDown = false;

@@ -47,12 +47,10 @@ export async function loadAllMessageApps(messageApps?: MessageApp[]): Promise<{
   }
 
   if (messageApps == null || messageApps.some((a) => a === "Signal")) {
-    const { SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER } = process.env;
-    if (SIGNAL_BAT_PATH || SIGNAL_PHONE_NUMBER) {
-      if (SIGNAL_BAT_PATH === undefined || SIGNAL_PHONE_NUMBER === undefined) {
-        throw new Error("Signal env vars partially set");
-      }
-      const signalCli = new SignalCli(SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER);
+    const { SIGNAL_PHONE_NUMBER } = process.env;
+    if (SIGNAL_PHONE_NUMBER) {
+      // The SDK resolves its bundled signal-cli binary automatically.
+      const signalCli = new SignalCli(SIGNAL_PHONE_NUMBER);
       await signalCli.connect();
       resolved.signalCli = signalCli;
       enabledApps.push("Signal");

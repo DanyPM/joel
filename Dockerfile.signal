@@ -1,0 +1,50 @@
+# Dedicated image for the Signal bot only.
+# Signal needs signal-cli (downloaded by the signal-sdk npm package's
+# postinstall) plus a persistent volume for its linked-device keys — concerns
+# none of the other apps (Telegram/WhatsApp/Matrix) share. Kept separate to keep
+# the main image lean.
+
+FROM node:24-slim AS builder
+
+# sharp needs these native libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvips-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+RUN npm run build
+
+# ---
+
+FROM node:24-slim AS production
+
+# sharp needs these native libs. No JRE: signal-sdk's postinstall pulls the
+# signal-cli *Linux native* build (a self-contained GraalVM binary), so no Java
+# runtime is required on Linux.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvips-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# npm ci runs signal-sdk's postinstall, which downloads signal-cli into
+# node_modules/signal-sdk/bin/signal-cli (already chmod 755 by the installer).
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+ENV NODE_ENV=production
+
+# signal-cli persists the linked-device identity keys here. Mount this path as
+# a Coolify persistent volume — otherwise every redeploy loses the link and the
+# QR pairing must be redone.
+#   Coolify → Storages → mount to: /root/.local/share/signal-cli
+
+CMD ["npm", "run", "start-si:prod"]
