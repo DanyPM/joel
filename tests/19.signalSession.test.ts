@@ -26,11 +26,11 @@ import {
   sendSignalAppMessage
 } from "../entities/SignalSession.ts";
 import type { ISession } from "../types.ts";
-import type { SignalCli } from "signal-sdk";
+import type { SignalRestClient } from "../utils/signalRestClient.ts";
 
 const makeSignalCli = () => {
-  const sendMessage = vi.fn(() => Promise.resolve({}));
-  return { cli: { sendMessage } as unknown as SignalCli, sendMessage };
+  const sendMessage = vi.fn(() => Promise.resolve());
+  return { cli: { sendMessage } as unknown as SignalRestClient, sendMessage };
 };
 
 const makeSession = (over: Partial<ISession> = {}): ISession =>

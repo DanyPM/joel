@@ -33,7 +33,9 @@ async function loadModule(encryptionEnabled: boolean) {
     SimpleFsStorageProvider: SimpleFsStorageProviderMock,
     RustSdkCryptoStorageProvider: RustSdkCryptoStorageProviderMock
   }));
-  vi.doMock("signal-sdk", () => ({ SignalCli: SignalCliMock }));
+  vi.doMock("../utils/signalRestClient.ts", () => ({
+    SignalRestClient: SignalCliMock
+  }));
   vi.doMock("whatsapp-api-js/middleware/express", () => ({
     WhatsAppAPI: WhatsAppAPIMock
   }));
@@ -54,6 +56,7 @@ const ENV_KEYS = [
   "WHATSAPP_APP_SECRET",
   "WHATSAPP_VERIFY_TOKEN",
   "SIGNAL_PHONE_NUMBER",
+  "SIGNAL_API_URL",
   "TELEGRAM_BOT_TOKEN",
   "MATRIX_HOME_URL",
   "MATRIX_BOT_TOKEN"
@@ -114,8 +117,9 @@ describe("loadAllMessageApps — WhatsApp", () => {
 });
 
 describe("loadAllMessageApps — Signal", () => {
-  it("enables Signal and connects when the phone number is set", async () => {
+  it("enables Signal and connects when phone number and API URL are set", async () => {
     process.env.SIGNAL_PHONE_NUMBER = "+33600000000";
+    process.env.SIGNAL_API_URL = "http://signal-api:8080";
 
     const loadAllMessageApps = await loadModule(true);
     const { messageApps, messageAppOptions } = await loadAllMessageApps([
@@ -123,17 +127,26 @@ describe("loadAllMessageApps — Signal", () => {
     ]);
 
     expect(messageApps).toEqual(["Signal"]);
-    // Forward-slash CLI path first, phone second (Windows-safe path handling).
+    // API URL first, phone second.
     expect(SignalCliMock).toHaveBeenCalledWith(
-      expect.stringMatching(/\/signal-cli(\.bat)?$/),
+      "http://signal-api:8080",
       "+33600000000"
     );
-    expect(SignalCliMock.mock.calls[0][0]).not.toContain("\\");
     expect(signalConnect).toHaveBeenCalledTimes(1);
     expect(messageAppOptions.signalCli).toBeDefined();
   });
 
   it("skips Signal when the phone number is unset", async () => {
+    process.env.SIGNAL_API_URL = "http://signal-api:8080";
+    const loadAllMessageApps = await loadModule(true);
+    const { messageApps } = await loadAllMessageApps(["Signal"]);
+
+    expect(messageApps).toEqual([]);
+    expect(SignalCliMock).not.toHaveBeenCalled();
+  });
+
+  it("skips Signal when SIGNAL_API_URL is unset", async () => {
+    process.env.SIGNAL_PHONE_NUMBER = "+33600000000";
     const loadAllMessageApps = await loadModule(true);
     const { messageApps } = await loadAllMessageApps(["Signal"]);
 
@@ -242,6 +255,7 @@ describe("loadAllMessageApps — selection & empty env", () => {
   it("enables all configured apps when messageApps is undefined", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "12345:abc";
     process.env.SIGNAL_PHONE_NUMBER = "+33600000000";
+    process.env.SIGNAL_API_URL = "http://signal-api:8080";
 
     const loadAllMessageApps = await loadModule(true);
     const { messageApps } = await loadAllMessageApps();
