@@ -155,10 +155,18 @@ describe("SignalSession.sendMessage wrapper", () => {
     expect((createPoll.mock.calls[0][2] as string[]).length).toBeGreaterThan(0);
   });
 
-  it("sends no poll for a plain message", async () => {
+  it("shows the main menu poll by default (parity with other apps)", async () => {
     const { cli, createPoll } = makeSignalCli();
     const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
     await session.sendMessage("bonjour");
+    expect(createPoll).toHaveBeenCalledTimes(1);
+    expect((createPoll.mock.calls[0][2] as string[]).length).toBeGreaterThan(0);
+  });
+
+  it("sends no poll when forceNoKeyboard is set", async () => {
+    const { cli, createPoll } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    await session.sendMessage("étape intermédiaire", { forceNoKeyboard: true });
     expect(createPoll).not.toHaveBeenCalled();
   });
 

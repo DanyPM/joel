@@ -93,15 +93,16 @@ export class SignalSession implements ISession {
       { ...options, useAsyncUmamiLog: false, hasAccount: this.user != null }
     );
 
-    // Render a menu / selection as a native Signal poll. An explicit keyboard
-    // becomes the poll options; separateMenuMessage shows the main menu. A poll
-    // failure never fails the text send.
+    // Render a menu / selection as a native Signal poll. Mirrors the other
+    // apps: an explicit keyboard becomes the poll options; otherwise the main
+    // menu is shown unless forceNoKeyboard is set. A poll failure never fails
+    // the text send.
     try {
       let answers: string[] | undefined;
       let prompt = SIGNAL_SELECT_PROMPT;
       if (options?.keyboard != null) {
         answers = options.keyboard.flat().map((k) => k.text);
-      } else if (options?.separateMenuMessage) {
+      } else if (!options?.forceNoKeyboard) {
         answers = SIGNAL_MAIN_MENU_LABELS;
         prompt = SIGNAL_MAIN_MENU_PROMPT;
       }
