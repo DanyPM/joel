@@ -8,14 +8,29 @@ import {
 } from "./Session.ts";
 import umami, { UmamiEvent, UmamiLogger } from "../utils/umami.ts";
 import { markdown2plainText, splitText } from "../utils/text.utils.ts";
-import { SignalCli } from "signal-sdk";
+import { SignalRestClient } from "../utils/signalRestClient.ts";
+import { KEYBOARD_KEYS } from "./Keyboard.ts";
 import { logError } from "../utils/debugLogger.ts";
 
 const SignalMessageApp: MessageApp = "Signal";
 
+// Signal has no reply keyboard, so menus and selections are rendered as native
+// Signal polls. These labels mirror the full main menu used on Matrix.
+const SIGNAL_MAIN_MENU_LABELS = [
+  KEYBOARD_KEYS.PEOPLE_SEARCH.key.text,
+  KEYBOARD_KEYS.ORGANISATION_FOLLOW.key.text,
+  KEYBOARD_KEYS.FUNCTION_FOLLOW.key.text,
+  KEYBOARD_KEYS.TEXT_SEARCH.key.text,
+  KEYBOARD_KEYS.ENA_INSP_PROMO_SEARCH_LONG_NO_KEYBOARD.key.text,
+  KEYBOARD_KEYS.FOLLOWS_LIST.key.text,
+  KEYBOARD_KEYS.HELP.key.text
+];
+const SIGNAL_MAIN_MENU_PROMPT = "🏠 Menu principal";
+const SIGNAL_SELECT_PROMPT = "👇 Choisissez une option";
+
 export const SIGNAL_MESSAGE_CHAR_LIMIT = 2000;
-const SIGNAL_COOL_DOWN_DELAY_SECONDS = 6;
-// signal-sdk exposes no error taxonomy, so a send failure is treated as transient:
+const SIGNAL_COOL_DOWN_DELAY_SECONDS = 2;
+// the Signal send path exposes no error taxonomy, so a failure is treated as transient:
 // resume from the failed chunk for a few capped-backoff attempts, then give up
 // (return false -> notification retried on a later run, user state unchanged).
 const MAX_SIGNAL_MESSAGE_RETRY = 3;
@@ -25,7 +40,7 @@ export const SIGNAL_API_SENDING_CONCURRENCY = 1;
 
 export class SignalSession implements ISession {
   messageApp = SignalMessageApp;
-  signalCli: SignalCli;
+  signalCli: SignalRestClient;
   language_code: string;
   chatId: string;
   botPhoneID: string;
@@ -34,7 +49,7 @@ export class SignalSession implements ISession {
   lastEngagementAt: Date;
 
   constructor(
-    signalCli: SignalCli,
+    signalCli: SignalRestClient,
     botPhoneID: string,
     userPhoneId: string,
     language_code: string,
@@ -59,7 +74,12 @@ export class SignalSession implements ISession {
   }
 
   sendTypingAction() {
-    // TODO: check implementation in Signal
+    const recipient = this.chatId.startsWith("+")
+      ? this.chatId
+      : "+" + this.chatId;
+    void this.signalCli.sendTyping(recipient).catch((error: unknown) => {
+      void logError("Signal", "Failed to send typing indicator", error);
+    });
   }
 
   log(args: { event: UmamiEvent; payload?: Record<string, unknown> }) {
@@ -75,12 +95,43 @@ export class SignalSession implements ISession {
     formattedData: string,
     options?: MessageSendingOptionsInternal
   ): Promise<boolean> {
-    return await sendSignalAppMessage(
+    const delivered = await sendSignalAppMessage(
       this.signalCli,
       this.chatId,
       formattedData,
       { ...options, useAsyncUmamiLog: false, hasAccount: this.user != null }
     );
+
+    // Render a menu / selection as a native Signal poll. Mirrors the other
+    // apps: an explicit keyboard becomes the poll options; otherwise the main
+    // menu is shown unless forceNoKeyboard is set. A poll failure never fails
+    // the text send.
+    try {
+      let answers: string[] | undefined;
+      let prompt = SIGNAL_SELECT_PROMPT;
+      if (options?.keyboard != null) {
+        answers = options.keyboard.flat().map((k) => k.text);
+      } else if (!options?.forceNoKeyboard) {
+        answers = SIGNAL_MAIN_MENU_LABELS;
+        prompt = SIGNAL_MAIN_MENU_PROMPT;
+      }
+      // A Signal poll needs at least two options. A single-option menu can't be
+      // a poll, so fall back to the full main menu; skip empty menus entirely.
+      if (answers?.length === 1) {
+        answers = SIGNAL_MAIN_MENU_LABELS;
+        prompt = SIGNAL_MAIN_MENU_PROMPT;
+      }
+      if (answers != null && answers.length >= 2) {
+        const recipient = this.chatId.startsWith("+")
+          ? this.chatId
+          : "+" + this.chatId;
+        await this.signalCli.createPoll(recipient, prompt, answers);
+      }
+    } catch (error) {
+      await logError("Signal", "Failed to send Signal poll menu", error);
+    }
+
+    return delivered;
   }
 
   extractMessageAppsOptions(): ExternalMessageOptions {
@@ -113,7 +164,7 @@ export async function extractSignalAppSession(
 }
 
 export async function sendSignalAppMessage(
-  signalCli: SignalCli,
+  signalCli: SignalRestClient,
   userPhoneId: string,
   message: string,
   options: MessageSendingOptionsInternal,
@@ -144,10 +195,14 @@ export async function sendSignalAppMessage(
         hasAccount: options.hasAccount
       });
 
-      // prevent hitting the Signal API rate limit
-      await new Promise((resolve) =>
-        setTimeout(resolve, SIGNAL_COOL_DOWN_DELAY_SECONDS * 1000)
-      );
+      // Space chunks out to avoid the Signal API rate limit, but not after the
+      // final chunk — a trailing delay only holds up whatever comes next
+      // (e.g. the poll menu sent right after the text).
+      if (i < mArr.length - 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, SIGNAL_COOL_DOWN_DELAY_SECONDS * 1000)
+        );
+      }
     }
     await recordSuccessfulDelivery(SignalMessageApp, userPhoneId);
   } catch (error) {

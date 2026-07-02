@@ -39,7 +39,7 @@ vi.mock("../models/User.ts", () => ({
 import { sendMessage } from "../entities/Session.ts";
 import type { MessageApp } from "../types.ts";
 import type { MatrixClient } from "matrix-bot-sdk";
-import type { SignalCli } from "signal-sdk";
+import type { SignalRestClient } from "../utils/signalRestClient.ts";
 import type { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 
 const opt = (over: Record<string, unknown> = {}) =>
@@ -64,7 +64,7 @@ describe("Session.sendMessage — dispatch routing", () => {
   });
 
   it("routes Signal to sendSignalAppMessage", async () => {
-    const signalCli = {} as unknown as SignalCli;
+    const signalCli = {} as unknown as SignalRestClient;
     await sendMessage(
       { messageApp: "Signal", chatId: "33600000000" },
       "hi",

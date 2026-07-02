@@ -7,7 +7,7 @@ import {
 import { ExternalMessageOptions } from "../entities/Session.ts";
 import { MessageApp } from "../types.ts";
 import { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
-import { SignalCli } from "signal-sdk";
+import { SignalRestClient } from "./signalRestClient.ts";
 import { WHATSAPP_API_VERSION } from "../entities/WhatsAppSession.ts";
 import { logError } from "./debugLogger.ts";
 import { StoreType } from "@matrix-org/matrix-sdk-crypto-nodejs";
@@ -47,12 +47,12 @@ export async function loadAllMessageApps(messageApps?: MessageApp[]): Promise<{
   }
 
   if (messageApps == null || messageApps.some((a) => a === "Signal")) {
-    const { SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER } = process.env;
-    if (SIGNAL_BAT_PATH || SIGNAL_PHONE_NUMBER) {
-      if (SIGNAL_BAT_PATH === undefined || SIGNAL_PHONE_NUMBER === undefined) {
-        throw new Error("Signal env vars partially set");
-      }
-      const signalCli = new SignalCli(SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER);
+    const { SIGNAL_PHONE_NUMBER, SIGNAL_API_URL } = process.env;
+    if (SIGNAL_PHONE_NUMBER && SIGNAL_API_URL) {
+      const signalCli = new SignalRestClient(
+        SIGNAL_API_URL,
+        SIGNAL_PHONE_NUMBER
+      );
       await signalCli.connect();
       resolved.signalCli = signalCli;
       enabledApps.push("Signal");
