@@ -1,0 +1,28 @@
+# JOEL Signal deployment: the bot plus the signal-cli daemon (REST + WebSocket).
+# Used both locally and as the Coolify deploy unit.
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    environment:
+      - MODE=json-rpc # persistent daemon; enables the WebSocket receive endpoint
+    ports:
+      - "8080:8080" # only needed for linking via the browser QR endpoint
+    volumes:
+      # linked-device identity keys; must persist across redeploys
+      - signal-data:/home/.local/share/signal-cli
+    restart: unless-stopped
+
+  joel-signal:
+    build:
+      context: .
+      dockerfile: Dockerfile.signal
+    environment:
+      - SIGNAL_API_URL=http://signal-api:8080
+    env_file:
+      - .env
+    depends_on:
+      - signal-api
+    restart: unless-stopped
+
+volumes:
+  signal-data:
