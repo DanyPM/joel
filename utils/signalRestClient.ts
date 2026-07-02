@@ -215,7 +215,7 @@ export class SignalRestClient extends EventEmitter {
     const res = await fetch(`${this.apiUrl}/v1/polls/${this.phoneNumber}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ recipient, pollTimestamp })
+      body: JSON.stringify({ recipient, poll_timestamp: pollTimestamp })
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -243,7 +243,7 @@ export class SignalRestClient extends EventEmitter {
 
     this.pollRegistry.delete(vote.targetSentTimestamp);
     void this.closePoll(entry.recipient, vote.targetSentTimestamp).catch(
-      () => undefined
+      (err: unknown) => console.error("Signal: failed to close poll", err)
     );
   }
 

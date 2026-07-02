@@ -244,7 +244,7 @@ describe("SignalRestClient polls", () => {
     expect(del?.[0]).toBe("http://signal-api:8080/v1/polls/+33111111111");
     expect(JSON.parse(String(del?.[1]?.body))).toEqual({
       recipient: "+33600000000",
-      pollTimestamp: "999"
+      poll_timestamp: "999"
     });
 
     client.disconnect();
