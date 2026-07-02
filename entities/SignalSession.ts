@@ -15,10 +15,14 @@ import { logError } from "../utils/debugLogger.ts";
 const SignalMessageApp: MessageApp = "Signal";
 
 // Signal has no reply keyboard, so menus and selections are rendered as native
-// Signal polls. These labels mirror the main-menu keyboard used elsewhere.
+// Signal polls. These labels mirror the full main menu used on Matrix.
 const SIGNAL_MAIN_MENU_LABELS = [
-  KEYBOARD_KEYS.FOLLOWS_LIST.key.text,
+  KEYBOARD_KEYS.PEOPLE_SEARCH.key.text,
+  KEYBOARD_KEYS.ORGANISATION_FOLLOW.key.text,
   KEYBOARD_KEYS.FUNCTION_FOLLOW.key.text,
+  KEYBOARD_KEYS.TEXT_SEARCH.key.text,
+  KEYBOARD_KEYS.ENA_INSP_PROMO_SEARCH_LONG_NO_KEYBOARD.key.text,
+  KEYBOARD_KEYS.FOLLOWS_LIST.key.text,
   KEYBOARD_KEYS.HELP.key.text
 ];
 const SIGNAL_MAIN_MENU_PROMPT = "🏠 Menu principal";
