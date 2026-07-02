@@ -211,6 +211,19 @@ export class SignalRestClient extends EventEmitter {
     return timestamp;
   }
 
+  // Whether this bot's number is already linked/registered on the rest-api.
+  // Returns false on any error (treat unknown as "not linked").
+  async isRegistered(): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.apiUrl}/v1/accounts`);
+      if (!res.ok) return false;
+      const accounts = (await res.json()) as string[];
+      return Array.isArray(accounts) && accounts.includes(this.phoneNumber);
+    } catch {
+      return false;
+    }
+  }
+
   // Show the "…is typing" indicator to a recipient. Signal clears it on the
   // next message or after its own timeout, so no explicit stop is needed.
   async sendTyping(recipient: string): Promise<void> {

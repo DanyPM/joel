@@ -169,6 +169,40 @@ describe("SignalRestClient.sendTyping", () => {
   });
 });
 
+describe("SignalRestClient.isRegistered", () => {
+  it("is true when the number is in /v1/accounts", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(["+33111111111"]), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      () => new FakeWS("x")
+    );
+    expect(await client.isRegistered()).toBe(true);
+  });
+
+  it("is false when the number is absent or the request fails", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      () => new FakeWS("x")
+    );
+    expect(await client.isRegistered()).toBe(false);
+    spy.mockRejectedValueOnce(new Error("network"));
+    expect(await client.isRegistered()).toBe(false);
+  });
+});
+
 describe("parsePollVote", () => {
   it("parses a vote frame into voter + timestamp + indexes", () => {
     const frame = JSON.stringify({

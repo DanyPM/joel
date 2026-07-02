@@ -7,7 +7,7 @@ import { startDailyNotificationJobs } from "../notifications/notificationSchedul
 import { logError } from "../utils/debugLogger.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 
-const { SIGNAL_PHONE_NUMBER, SIGNAL_API_URL } = process.env;
+const { SIGNAL_PHONE_NUMBER, SIGNAL_API_URL, SIGNAL_DEVICE_NAME } = process.env;
 
 if (SIGNAL_PHONE_NUMBER === undefined || SIGNAL_API_URL === undefined) {
   console.log("Signal: env is not set, bot did not start \u{1F6A9}");
@@ -28,6 +28,21 @@ await (async () => {
     // Talks to the signal-cli-rest-api service over HTTP (send) + WebSocket
     // (receive). No local signal-cli process.
     const signalCli = new SignalRestClient(SIGNAL_API_URL, SIGNAL_PHONE_NUMBER);
+
+    // Before anything else (incl. the DB), make sure the number is linked —
+    // otherwise the WebSocket connect just times out with no useful hint. Print
+    // the QR-link URL and exit non-zero so the restart policy re-checks until
+    // the device is paired.
+    if (!(await signalCli.isRegistered())) {
+      const deviceName = SIGNAL_DEVICE_NAME ?? "JOEL";
+      console.log(
+        `Signal: ${SIGNAL_PHONE_NUMBER} is not linked yet \u{1F517}\n` +
+          `Open this in a browser (via the signalapi service's public domain in ` +
+          `Coolify) and scan it in Signal → Settings → Linked devices:\n` +
+          `  ${SIGNAL_API_URL}/v1/qrcodelink?device_name=${encodeURIComponent(deviceName)}`
+      );
+      process.exit(1);
+    }
 
     // Register stopper
     let shuttingDown = false;
