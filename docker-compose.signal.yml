@@ -10,13 +10,12 @@ services:
     image: bbernhard/signal-cli-rest-api:latest
     environment:
       - MODE=json-rpc # persistent daemon; enables the WebSocket receive endpoint
-      # Coolify generates a domain and routes it to port 8080 so the QR-link
-      # endpoint is reachable. SERVICE_URL (not FQDN) yields a full URL *with*
-      # scheme in Coolify's Links (sslip.io domains are http-only). NOTE: the
-      # rest-api has no auth — anyone with the URL can send/read as your number.
-      # Use it only to link the device, then remove the domain (the bot reaches
-      # the API internally over the compose network).
-      - SERVICE_URL_SIGNALAPI_8080
+    # Device linking needs the /v1/qrcodelink endpoint reachable in a browser.
+    # In Coolify, open this resource → the "signalapi" service → Domains, set a
+    # domain and map it to container port 8080; Coolify writes the Traefik route
+    # and shows the link. NOTE: the rest-api has no auth — anyone with the URL
+    # can send/read as your number. Add the domain only to link the device, then
+    # remove it (the bot reaches the API internally over the compose network).
     # Internal only — the bot reaches this over the compose network. Coolify
     # routes the generated domain to this port for one-time device linking via
     # /v1/qrcodelink. No host port, so no clash on shared hosts.
