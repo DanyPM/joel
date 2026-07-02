@@ -96,16 +96,18 @@ describe("getJORFRecordsFromDate", () => {
     expect(results).toHaveLength(3);
     expect(getSpy).toHaveBeenCalledTimes(3);
     for (let i = 1; i < results.length; i++) {
-      expect(
-        new Date(results[i].source_date).getTime()
-      ).toBeGreaterThanOrEqual(new Date(results[i - 1].source_date).getTime());
+      expect(new Date(results[i].source_date).getTime()).toBeGreaterThanOrEqual(
+        new Date(results[i - 1].source_date).getTime()
+      );
     }
     // Aggregated stats logged once per app.
     const dateEvents = umamiLogSpy.mock.calls.filter(
-      (c) => c[0]?.event === "/jorfsearch-request-date"
+      (c) => (c[0] as { event?: string }).event === "/jorfsearch-request-date"
     );
     expect(dateEvents).toHaveLength(2);
-    expect(dateEvents[0][0].payload.day_nb).toBe(3);
+    expect(
+      (dateEvents[0][0] as { payload: { day_nb: number } }).payload.day_nb
+    ).toBe(3);
   });
 
   it("tolerates a day returning a null/string payload", async () => {
@@ -147,10 +149,12 @@ describe("getJORFMetaRecordsFromDate", () => {
       );
     }
     const metaEvents = umamiLogSpy.mock.calls.filter(
-      (c) => c[0]?.event === "/jorfsearch-request-meta"
+      (c) => (c[0] as { event?: string }).event === "/jorfsearch-request-meta"
     );
     expect(metaEvents).toHaveLength(1);
-    expect(metaEvents[0][0].payload.day_nb).toBe(3);
+    expect(
+      (metaEvents[0][0] as { payload: { day_nb: number } }).payload.day_nb
+    ).toBe(3);
     // Persisted to the in-memory DB (saveMetaPublications upserts).
     expect(umamiLogAsyncSpy).toHaveBeenCalled();
   });

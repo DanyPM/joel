@@ -140,7 +140,13 @@ describe("SignalSession.sendMessage wrapper", () => {
 
   it("renders an explicit keyboard as a native poll (flattened labels)", async () => {
     const { cli, createPoll } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     await session.sendMessage("Choisir :", {
       keyboard: [[{ text: "📋 A" }], [{ text: "💼 B" }, { text: "❓ C" }]]
     });
@@ -151,7 +157,13 @@ describe("SignalSession.sendMessage wrapper", () => {
 
   it("falls back to the full menu for a single-option keyboard (poll needs >= 2)", async () => {
     const { cli, createPoll } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     await session.sendMessage("Choisir :", {
       keyboard: [[{ text: "🔎 Suivre" }]]
     });
@@ -164,14 +176,26 @@ describe("SignalSession.sendMessage wrapper", () => {
 
   it("sends no poll for an empty keyboard", async () => {
     const { cli, createPoll } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     await session.sendMessage("rien", { keyboard: [] });
     expect(createPoll).not.toHaveBeenCalled();
   });
 
   it("shows the main menu poll when separateMenuMessage is set", async () => {
     const { cli, createPoll } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     await session.sendMessage("Aide", { separateMenuMessage: true });
     expect(createPoll).toHaveBeenCalledTimes(1);
     expect((createPoll.mock.calls[0][2] as string[]).length).toBeGreaterThan(0);
@@ -179,7 +203,13 @@ describe("SignalSession.sendMessage wrapper", () => {
 
   it("shows the main menu poll by default (parity with other apps)", async () => {
     const { cli, createPoll } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     await session.sendMessage("bonjour");
     expect(createPoll).toHaveBeenCalledTimes(1);
     expect((createPoll.mock.calls[0][2] as string[]).length).toBeGreaterThan(0);
@@ -187,7 +217,13 @@ describe("SignalSession.sendMessage wrapper", () => {
 
   it("sends no poll when forceNoKeyboard is set", async () => {
     const { cli, createPoll } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     await session.sendMessage("étape intermédiaire", { forceNoKeyboard: true });
     expect(createPoll).not.toHaveBeenCalled();
   });
@@ -214,7 +250,13 @@ describe("SignalSession.sendMessage wrapper", () => {
 
   it("sendTypingAction sends a typing indicator to the chat", () => {
     const { cli, sendTyping } = makeSignalCli();
-    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    const session = new SignalSession(
+      cli,
+      "BOT",
+      "+33600000000",
+      "fr",
+      new Date()
+    );
     session.sendTypingAction();
     expect(sendTyping).toHaveBeenCalledWith("+33600000000");
   });

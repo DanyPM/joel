@@ -16,7 +16,7 @@ const SignalCliMock = vi.fn(function () {
 });
 
 const WhatsAppAPIMock = vi.fn(function () {
-  return { on: {} as Record<string, unknown> };
+  return { on: {} };
 });
 
 const logErrorMock = vi.fn(() => Promise.resolve());
@@ -68,7 +68,7 @@ beforeEach(() => {
   savedEnv = {};
   for (const k of ENV_KEYS) {
     savedEnv[k] = process.env[k];
-    delete process.env[k];
+    Reflect.deleteProperty(process.env, k);
   }
   vi.clearAllMocks();
   matrixStart.mockResolvedValue(undefined);
@@ -76,7 +76,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const k of ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
+    if (savedEnv[k] === undefined) Reflect.deleteProperty(process.env, k);
     else process.env[k] = savedEnv[k];
   }
 });

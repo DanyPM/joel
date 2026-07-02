@@ -11,7 +11,7 @@ export interface SignalEnvelopeMessage {
 // Minimal surface of the global WebSocket the adapter relies on. Lets tests
 // inject a fake without a real socket.
 export interface WebSocketLike {
-  addEventListener(type: string, cb: (ev: any) => void): void;
+  addEventListener(type: string, cb: (ev: { data?: unknown }) => void): void;
   close(): void;
 }
 
@@ -40,8 +40,8 @@ export function parseSignalFrame(data: unknown): SignalEnvelopeMessage | null {
   } catch {
     return null;
   }
-  const env = (parsed as Partial<SignalEnvelopeMessage>)?.envelope;
-  if (env == null || env.dataMessage?.message == null) return null;
+  const env = (parsed as Partial<SignalEnvelopeMessage> | null)?.envelope;
+  if (env?.dataMessage?.message == null) return null;
   return parsed as SignalEnvelopeMessage;
 }
 
@@ -62,7 +62,7 @@ export function parsePollVote(data: unknown): SignalPollVote | null {
           pollVote?: { targetSentTimestamp?: number; optionIndexes?: number[] };
         };
       };
-    }
+    } | null
   )?.envelope;
   const vote = env?.dataMessage?.pollVote;
   if (
@@ -98,8 +98,7 @@ export class SignalRestClient extends EventEmitter {
   constructor(
     apiUrl: string,
     phoneNumber: string,
-    wsFactory: (url: string) => WebSocketLike = (url) =>
-      new WebSocket(url) as unknown as WebSocketLike
+    wsFactory: (url: string) => WebSocketLike = (url) => new WebSocket(url)
   ) {
     super();
     this.apiUrl = apiUrl.replace(/\/+$/, "");
@@ -131,12 +130,12 @@ export class SignalRestClient extends EventEmitter {
       onOpen?.();
     });
     ws.addEventListener("message", (ev: { data?: unknown }) => {
-      const parsed = parseSignalFrame(ev?.data);
+      const parsed = parseSignalFrame(ev.data);
       if (parsed) {
         this.emit("message", parsed);
         return;
       }
-      const vote = parsePollVote(ev?.data);
+      const vote = parsePollVote(ev.data);
       if (vote) this.handlePollVote(vote);
     });
     ws.addEventListener("close", () => {
@@ -174,7 +173,7 @@ export class SignalRestClient extends EventEmitter {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(
-        `signal-cli-rest-api send failed: ${res.status} ${res.statusText} ${body}`.trim()
+        `signal-cli-rest-api send failed: ${String(res.status)} ${res.statusText} ${body}`.trim()
       );
     }
   }
@@ -199,7 +198,7 @@ export class SignalRestClient extends EventEmitter {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(
-        `signal-cli-rest-api poll create failed: ${res.status} ${res.statusText} ${body}`.trim()
+        `signal-cli-rest-api poll create failed: ${String(res.status)} ${res.statusText} ${body}`.trim()
       );
     }
     const { timestamp } = (await res.json()) as { timestamp: string };
@@ -226,7 +225,7 @@ export class SignalRestClient extends EventEmitter {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(
-        `signal-cli-rest-api typing failed: ${res.status} ${res.statusText} ${body}`.trim()
+        `signal-cli-rest-api typing failed: ${String(res.status)} ${res.statusText} ${body}`.trim()
       );
     }
   }
@@ -240,7 +239,7 @@ export class SignalRestClient extends EventEmitter {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(
-        `signal-cli-rest-api poll close failed: ${res.status} ${res.statusText} ${body}`.trim()
+        `signal-cli-rest-api poll close failed: ${String(res.status)} ${res.statusText} ${body}`.trim()
       );
     }
   }
@@ -262,7 +261,7 @@ export class SignalRestClient extends EventEmitter {
       } satisfies SignalEnvelopeMessage);
       return;
     }
-    const label = entry.answers[vote.optionIndexes[0]];
+    const label = entry.answers.at(vote.optionIndexes[0]);
     if (label == null) return;
 
     this.emit("message", {
@@ -274,7 +273,9 @@ export class SignalRestClient extends EventEmitter {
 
     this.pollRegistry.delete(vote.targetSentTimestamp);
     void this.closePoll(entry.recipient, vote.targetSentTimestamp).catch(
-      (err: unknown) => console.error("Signal: failed to close poll", err)
+      (err: unknown) => {
+        console.error("Signal: failed to close poll", err);
+      }
     );
   }
 

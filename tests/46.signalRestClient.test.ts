@@ -3,6 +3,7 @@ import {
   parseSignalFrame,
   parsePollVote,
   SignalRestClient,
+  type SignalEnvelopeMessage,
   type WebSocketLike
 } from "../utils/signalRestClient.ts";
 
@@ -30,19 +31,25 @@ describe("parseSignalFrame", () => {
   });
 });
 
+interface WsEvent {
+  data?: unknown;
+}
+
 // Minimal fake WebSocket implementing WebSocketLike + event dispatch.
 class FakeWS implements WebSocketLike {
-  handlers: Record<string, ((ev: any) => void)[]> = {};
+  handlers: Record<string, ((ev: WsEvent) => void)[]> = {};
   static last: FakeWS;
   closed = false;
   constructor(public url: string) {
     FakeWS.last = this;
   }
-  addEventListener(type: string, cb: (ev: any) => void) {
+  addEventListener(type: string, cb: (ev: WsEvent) => void) {
     (this.handlers[type] ??= []).push(cb);
   }
-  emit(type: string, ev?: any) {
-    (this.handlers[type] ?? []).forEach((h) => h(ev));
+  emit(type: string, ev: WsEvent = {}) {
+    (this.handlers[type] ?? []).forEach((h) => {
+      h(ev);
+    });
   }
   close() {
     this.closed = true;
@@ -58,13 +65,15 @@ describe("SignalRestClient.connect / message", () => {
       (url) => new FakeWS(url)
     );
     const received: unknown[] = [];
-    client.on("message", (m) => received.push(m));
+    client.on("message", (m: SignalEnvelopeMessage) => received.push(m));
 
     const connected = client.connect();
     FakeWS.last.emit("open");
     await connected;
 
-    expect(FakeWS.last.url).toBe("ws://signal-api:8080/v1/receive/+33111111111");
+    expect(FakeWS.last.url).toBe(
+      "ws://signal-api:8080/v1/receive/+33111111111"
+    );
 
     FakeWS.last.emit("message", {
       data: JSON.stringify({
@@ -118,7 +127,7 @@ describe("SignalRestClient.sendMessage", () => {
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://signal-api:8080/v2/send");
-    expect(JSON.parse(String(init?.body))).toEqual({
+    expect(JSON.parse(init?.body as string)).toEqual({
       number: "+33111111111",
       recipients: ["+33600000000"],
       message: "hello"
@@ -154,7 +163,7 @@ describe("SignalRestClient.sendTyping", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://signal-api:8080/v1/typing-indicator/+33111111111");
     expect(init?.method).toBe("PUT");
-    expect(JSON.parse(String(init?.body))).toEqual({
+    expect(JSON.parse(init?.body as string)).toEqual({
       recipient: "+33600000000"
     });
   });
@@ -188,14 +197,12 @@ describe("parsePollVote", () => {
 
 describe("SignalRestClient polls", () => {
   it("createPoll POSTs to /v1/polls/{bot} and returns the timestamp", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify({ timestamp: "1783018038934" }), {
-          status: 201,
-          headers: { "content-type": "application/json" }
-        })
-      );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ timestamp: "1783018038934" }), {
+        status: 201,
+        headers: { "content-type": "application/json" }
+      })
+    );
     const client = new SignalRestClient(
       "http://signal-api:8080",
       "+33111111111",
@@ -208,7 +215,7 @@ describe("SignalRestClient polls", () => {
     expect(ts).toBe("1783018038934");
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://signal-api:8080/v1/polls/+33111111111");
-    expect(JSON.parse(String(init?.body))).toEqual({
+    expect(JSON.parse(init?.body as string)).toEqual({
       recipient: "+33600000000",
       question: "Menu ?",
       answers: ["📋 A", "💼 B"],
@@ -229,7 +236,7 @@ describe("SignalRestClient polls", () => {
       (url) => new FakeWS(url)
     );
     const received: { envelope: { dataMessage?: { message?: string } } }[] = [];
-    client.on("message", (m) => received.push(m));
+    client.on("message", (m: SignalEnvelopeMessage) => received.push(m));
 
     const connected = client.connect();
     FakeWS.last.emit("open");
@@ -262,7 +269,7 @@ describe("SignalRestClient polls", () => {
     const del = fetchMock.mock.calls.find((c) => c[1]?.method === "DELETE");
     expect(del).toBeDefined();
     expect(del?.[0]).toBe("http://signal-api:8080/v1/polls/+33111111111");
-    expect(JSON.parse(String(del?.[1]?.body))).toEqual({
+    expect(JSON.parse(del?.[1]?.body as string)).toEqual({
       recipient: "+33600000000",
       poll_timestamp: "999"
     });
@@ -277,7 +284,7 @@ describe("SignalRestClient polls", () => {
       (url) => new FakeWS(url)
     );
     const received: { envelope: { dataMessage?: { message?: string } } }[] = [];
-    client.on("message", (m) => received.push(m));
+    client.on("message", (m: SignalEnvelopeMessage) => received.push(m));
     const connected = client.connect();
     FakeWS.last.emit("open");
     await connected;
@@ -295,7 +302,9 @@ describe("SignalRestClient polls", () => {
     });
     // Not resolvable -> re-emit as the main-menu label so the user isn't stuck.
     expect(received).toHaveLength(1);
-    expect(received[0].envelope.dataMessage?.message).toContain("Menu principal");
+    expect(received[0].envelope.dataMessage?.message).toContain(
+      "Menu principal"
+    );
     client.disconnect();
   });
 });
