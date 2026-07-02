@@ -149,6 +149,26 @@ describe("SignalSession.sendMessage wrapper", () => {
     expect(createPoll.mock.calls[0][2]).toEqual(["📋 A", "💼 B", "❓ C"]);
   });
 
+  it("falls back to the full menu for a single-option keyboard (poll needs >= 2)", async () => {
+    const { cli, createPoll } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    await session.sendMessage("Choisir :", {
+      keyboard: [[{ text: "🔎 Suivre" }]]
+    });
+    expect(createPoll).toHaveBeenCalledTimes(1);
+    const answers = createPoll.mock.calls[0][2] as string[];
+    // The lone button is replaced by the full main menu (>= 2 options).
+    expect(answers.length).toBeGreaterThanOrEqual(2);
+    expect(answers).not.toContain("🔎 Suivre");
+  });
+
+  it("sends no poll for an empty keyboard", async () => {
+    const { cli, createPoll } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    await session.sendMessage("rien", { keyboard: [] });
+    expect(createPoll).not.toHaveBeenCalled();
+  });
+
   it("shows the main menu poll when separateMenuMessage is set", async () => {
     const { cli, createPoll } = makeSignalCli();
     const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());

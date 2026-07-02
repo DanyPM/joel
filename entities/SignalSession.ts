@@ -115,7 +115,13 @@ export class SignalSession implements ISession {
         answers = SIGNAL_MAIN_MENU_LABELS;
         prompt = SIGNAL_MAIN_MENU_PROMPT;
       }
-      if (answers != null && answers.length > 0) {
+      // A Signal poll needs at least two options. A single-option menu can't be
+      // a poll, so fall back to the full main menu; skip empty menus entirely.
+      if (answers?.length === 1) {
+        answers = SIGNAL_MAIN_MENU_LABELS;
+        prompt = SIGNAL_MAIN_MENU_PROMPT;
+      }
+      if (answers != null && answers.length >= 2) {
         const recipient = this.chatId.startsWith("+")
           ? this.chatId
           : "+" + this.chatId;
