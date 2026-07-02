@@ -25,7 +25,7 @@ const SIGNAL_MAIN_MENU_PROMPT = "🏠 Menu principal";
 const SIGNAL_SELECT_PROMPT = "👇 Choisissez une option";
 
 export const SIGNAL_MESSAGE_CHAR_LIMIT = 2000;
-const SIGNAL_COOL_DOWN_DELAY_SECONDS = 6;
+const SIGNAL_COOL_DOWN_DELAY_SECONDS = 2;
 // the Signal send path exposes no error taxonomy, so a failure is treated as transient:
 // resume from the failed chunk for a few capped-backoff attempts, then give up
 // (return false -> notification retried on a later run, user state unchanged).
@@ -179,10 +179,14 @@ export async function sendSignalAppMessage(
         hasAccount: options.hasAccount
       });
 
-      // prevent hitting the Signal API rate limit
-      await new Promise((resolve) =>
-        setTimeout(resolve, SIGNAL_COOL_DOWN_DELAY_SECONDS * 1000)
-      );
+      // Space chunks out to avoid the Signal API rate limit, but not after the
+      // final chunk — a trailing delay only holds up whatever comes next
+      // (e.g. the poll menu sent right after the text).
+      if (i < mArr.length - 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, SIGNAL_COOL_DOWN_DELAY_SECONDS * 1000)
+        );
+      }
     }
     await recordSuccessfulDelivery(SignalMessageApp, userPhoneId);
   } catch (error) {
