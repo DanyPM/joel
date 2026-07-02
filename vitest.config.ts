@@ -25,7 +25,6 @@ export default defineConfig({
         "apps/**",
         "scripts/**",
         "local_tools/**",
-        "utils/connectSignal.ts",
         "tests/**",
         "eslint.config.js",
         "dist/**",

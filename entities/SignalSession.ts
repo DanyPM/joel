@@ -8,14 +8,14 @@ import {
 } from "./Session.ts";
 import umami, { UmamiEvent, UmamiLogger } from "../utils/umami.ts";
 import { markdown2plainText, splitText } from "../utils/text.utils.ts";
-import { SignalCli } from "signal-sdk";
+import { SignalRestClient } from "../utils/signalRestClient.ts";
 import { logError } from "../utils/debugLogger.ts";
 
 const SignalMessageApp: MessageApp = "Signal";
 
 export const SIGNAL_MESSAGE_CHAR_LIMIT = 2000;
 const SIGNAL_COOL_DOWN_DELAY_SECONDS = 6;
-// signal-sdk exposes no error taxonomy, so a send failure is treated as transient:
+// the Signal send path exposes no error taxonomy, so a failure is treated as transient:
 // resume from the failed chunk for a few capped-backoff attempts, then give up
 // (return false -> notification retried on a later run, user state unchanged).
 const MAX_SIGNAL_MESSAGE_RETRY = 3;
@@ -25,7 +25,7 @@ export const SIGNAL_API_SENDING_CONCURRENCY = 1;
 
 export class SignalSession implements ISession {
   messageApp = SignalMessageApp;
-  signalCli: SignalCli;
+  signalCli: SignalRestClient;
   language_code: string;
   chatId: string;
   botPhoneID: string;
@@ -34,7 +34,7 @@ export class SignalSession implements ISession {
   lastEngagementAt: Date;
 
   constructor(
-    signalCli: SignalCli,
+    signalCli: SignalRestClient,
     botPhoneID: string,
     userPhoneId: string,
     language_code: string,
@@ -113,7 +113,7 @@ export async function extractSignalAppSession(
 }
 
 export async function sendSignalAppMessage(
-  signalCli: SignalCli,
+  signalCli: SignalRestClient,
   userPhoneId: string,
   message: string,
   options: MessageSendingOptionsInternal,

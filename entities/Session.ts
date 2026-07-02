@@ -6,7 +6,7 @@ import { sendTelegramMessage } from "./TelegramSession.ts";
 import { sendWhatsAppMessage } from "./WhatsAppSession.ts";
 import { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 import { sendSignalAppMessage } from "./SignalSession.ts";
-import { SignalCli } from "signal-sdk";
+import { SignalRestClient } from "../utils/signalRestClient.ts";
 import { MatrixClient } from "matrix-bot-sdk";
 import { Keyboard } from "./Keyboard.ts";
 import { sendMatrixMessage } from "./MatrixSession.ts";
@@ -18,7 +18,7 @@ export const messageReceivedTimeHistory = new Map<string, Date>(); // key is ${m
 export interface ExternalMessageOptions {
   matrixClient?: MatrixClient;
   tchapClient?: MatrixClient;
-  signalCli?: SignalCli;
+  signalCli?: SignalRestClient;
   telegramBotToken?: string;
   whatsAppAPI?: WhatsAppAPI;
   forceNoKeyboard?: boolean;
@@ -139,7 +139,7 @@ export interface MessageSendingOptionsExternal {
   telegramBotToken?: string;
   matrixClient?: MatrixClient;
   tchapClient?: MatrixClient;
-  signalCli?: SignalCli;
+  signalCli?: SignalRestClient;
   whatsAppAPI?: WhatsAppAPI;
   forceNoKeyboard?: boolean;
   keyboard?: Keyboard;
