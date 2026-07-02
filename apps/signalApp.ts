@@ -1,21 +1,17 @@
 import "dotenv/config";
 
-import { SignalCli } from "signal-sdk";
+import { SignalRestClient } from "../utils/signalRestClient.ts";
 import { mongodbConnect, mongodbDisconnect } from "../db.ts";
 import { SignalSession } from "../entities/SignalSession.ts";
 import { startDailyNotificationJobs } from "../notifications/notificationScheduler.ts";
 import { logError } from "../utils/debugLogger.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 
-const { SIGNAL_PHONE_NUMBER, SIGNAL_BAT_PATH } = process.env;
+const { SIGNAL_PHONE_NUMBER, SIGNAL_API_URL } = process.env;
 
-if (SIGNAL_PHONE_NUMBER === undefined) {
+if (SIGNAL_PHONE_NUMBER === undefined || SIGNAL_API_URL === undefined) {
   console.log("Signal: env is not set, bot did not start \u{1F6A9}");
   process.exit(0);
-}
-
-if (SIGNAL_BAT_PATH === undefined) {
-  throw new Error("SIGNAL_BAT_PATH env variable not set");
 }
 
 interface ISignalMessage {
@@ -29,8 +25,9 @@ interface ISignalMessage {
 }
 await (async () => {
   try {
-    // Initialize SignalCli with phone number
-    const signalCli = new SignalCli(SIGNAL_BAT_PATH, SIGNAL_PHONE_NUMBER);
+    // Talks to the signal-cli-rest-api service over HTTP (send) + WebSocket
+    // (receive). No local signal-cli process.
+    const signalCli = new SignalRestClient(SIGNAL_API_URL, SIGNAL_PHONE_NUMBER);
 
     // Register stopper
     let shuttingDown = false;
@@ -102,5 +99,9 @@ await (async () => {
     console.log(`Signal: JOEL started successfully \u{2705}`);
   } catch (error) {
     await logError("Signal", "Failed to start Signal app", error);
+    // Exit non-zero so the container's restart policy recovers, instead of
+    // lingering as a half-started process (e.g. if the rest-api WebSocket was
+    // not yet reachable on first connect).
+    process.exit(1);
   }
 })();

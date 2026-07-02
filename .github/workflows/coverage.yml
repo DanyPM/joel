@@ -1,0 +1,44 @@
+name: Coverage
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm test
+
+      - name: Generate coverage badge
+        run: npx tsx scripts/coverage-badge.ts
+
+      # main is protected, so the badge is published to a dedicated, orphan
+      # `badges` branch (force-updated) instead of committed back to main.
+      - name: Publish badge to the badges branch
+        run: |
+          cp .github/badges/coverage.json "$RUNNER_TEMP/coverage.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan badges
+          git rm -rf . > /dev/null 2>&1 || true
+          cp "$RUNNER_TEMP/coverage.json" coverage.json
+          git add coverage.json
+          git commit -m "chore(badge): update coverage badge [skip ci]"
+          git push -f origin badges

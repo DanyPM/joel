@@ -628,34 +628,13 @@ export function trimStrings<T>(value: T): T {
   return value;
 }
 
-// Remove accents and light Markdown/emoji, return ASCII-ish text.
+// Strip emoji and light Markdown emphasis, keeping accents/diacritics intact.
 export function markdown2plainText(msg: string): string {
-  function deburr(input: string): string {
-    const decomposed = input.normalize("NFD");
-
-    const stripped = decomposed.replace(/[\u0300-\u036f]/gu, "");
-
-    return stripped
-      .replace(/ß/g, "ss")
-      .replace(/Æ/g, "AE")
-      .replace(/æ/g, "ae")
-      .replace(/Ø/g, "O")
-      .replace(/ø/g, "o")
-      .replace(/Ð/g, "D")
-      .replace(/ð/g, "d")
-      .replace(/Þ/g, "Th")
-      .replace(/þ/g, "th")
-      .replace(/Œ/g, "OE")
-      .replace(/œ/g, "oe");
-  }
-
+  // signal-cli-rest-api and Matrix handle UTF-8, so deburring is unnecessary
+  // and only mangled French output.
   const emoteFreeText = msg.replace(emojiRegex(), "");
 
-  const formattingFreeText = emoteFreeText.replace(/[_*]/gu, "");
-
-  const accentFreeText = deburr(formattingFreeText);
-
-  return accentFreeText;
+  return emoteFreeText.replace(/[_*]/gu, "");
 }
 
 export function markdown2WHMarkdown(input: string): string {

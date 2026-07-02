@@ -28,7 +28,7 @@ import {
 import { SIGNAL_MESSAGE_CHAR_LIMIT } from "../entities/SignalSession.ts";
 import type { ExtendedMiniUserInfo } from "../entities/Session.ts";
 import type { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
-import type { SignalCli } from "signal-sdk";
+import type { SignalRestClient } from "../utils/signalRestClient.ts";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -135,7 +135,7 @@ describe("sendSignalAppMessage — resume from failed chunk", () => {
       if (n === 2) return Promise.reject(new Error("transient signal error"));
       return Promise.resolve({});
     });
-    const signalCli = { sendMessage: send } as unknown as SignalCli;
+    const signalCli = { sendMessage: send } as unknown as SignalRestClient;
 
     const res = await sendSignalAppMessage(
       signalCli,
@@ -158,7 +158,7 @@ describe("sendSignalAppMessage — resume from failed chunk", () => {
     const send = vi.fn(() =>
       Promise.reject(new Error("persistent signal error"))
     );
-    const signalCli = { sendMessage: send } as unknown as SignalCli;
+    const signalCli = { sendMessage: send } as unknown as SignalRestClient;
 
     const res = await sendSignalAppMessage(signalCli, "33600000000", "short", {
       useAsyncUmamiLog: false,

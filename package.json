@@ -7,7 +7,7 @@
     "start-tg": "tsx apps/telegramApp.ts",
     "start-wh": "tsx apps/whatsAppApp.ts",
     "start-si": "tsx apps/signalApp.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "start:prod": "concurrently \"npm run start-tg:prod\" \"npm run start-wh:prod\" \"npm run start-mx:prod\"",
     "start-mx:prod": "node dist/apps/matrixApp.js",
     "start-tg:prod": "node dist/apps/telegramApp.js",
@@ -35,7 +35,6 @@
     "mongoose": "^9.7.1",
     "nodemon": "^3.1.14",
     "p-limit": "^7.3.0",
-    "signal-sdk": "^0.2.4",
     "telegraf": "^4.16.3",
     "tsx": "^4.22.4",
     "whatsapp-api-js": "^6.2.1"
