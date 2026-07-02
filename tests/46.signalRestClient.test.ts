@@ -140,6 +140,26 @@ describe("SignalRestClient.sendMessage", () => {
   });
 });
 
+describe("SignalRestClient.sendTyping", () => {
+  it("PUTs to /v1/typing-indicator/{bot} with the recipient", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      () => new FakeWS("x")
+    );
+    await client.sendTyping("+33600000000");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://signal-api:8080/v1/typing-indicator/+33111111111");
+    expect(init?.method).toBe("PUT");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      recipient: "+33600000000"
+    });
+  });
+});
+
 describe("parsePollVote", () => {
   it("parses a vote frame into voter + timestamp + indexes", () => {
     const frame = JSON.stringify({

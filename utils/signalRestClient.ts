@@ -211,6 +211,25 @@ export class SignalRestClient extends EventEmitter {
     return timestamp;
   }
 
+  // Show the "…is typing" indicator to a recipient. Signal clears it on the
+  // next message or after its own timeout, so no explicit stop is needed.
+  async sendTyping(recipient: string): Promise<void> {
+    const res = await fetch(
+      `${this.apiUrl}/v1/typing-indicator/${this.phoneNumber}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recipient })
+      }
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `signal-cli-rest-api typing failed: ${res.status} ${res.statusText} ${body}`.trim()
+      );
+    }
+  }
+
   async closePoll(recipient: string, pollTimestamp: string): Promise<void> {
     const res = await fetch(`${this.apiUrl}/v1/polls/${this.phoneNumber}`, {
       method: "DELETE",

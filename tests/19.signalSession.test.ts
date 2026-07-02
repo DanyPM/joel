@@ -31,10 +31,12 @@ import type { SignalRestClient } from "../utils/signalRestClient.ts";
 const makeSignalCli = () => {
   const sendMessage = vi.fn(() => Promise.resolve());
   const createPoll = vi.fn(() => Promise.resolve("1"));
+  const sendTyping = vi.fn(() => Promise.resolve());
   return {
-    cli: { sendMessage, createPoll } as unknown as SignalRestClient,
+    cli: { sendMessage, createPoll, sendTyping } as unknown as SignalRestClient,
     sendMessage,
-    createPoll
+    createPoll,
+    sendTyping
   };
 };
 
@@ -188,6 +190,13 @@ describe("SignalSession.sendMessage wrapper", () => {
     const session = new SignalSession(cli, "BOT", "1", "fr", new Date());
     await session.createUser();
     expect(findOrCreateSpy).toHaveBeenCalledWith(session);
+  });
+
+  it("sendTypingAction sends a typing indicator to the chat", () => {
+    const { cli, sendTyping } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    session.sendTypingAction();
+    expect(sendTyping).toHaveBeenCalledWith("+33600000000");
   });
 
   it("log forwards to umami", () => {

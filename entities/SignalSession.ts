@@ -70,7 +70,12 @@ export class SignalSession implements ISession {
   }
 
   sendTypingAction() {
-    // TODO: check implementation in Signal
+    const recipient = this.chatId.startsWith("+")
+      ? this.chatId
+      : "+" + this.chatId;
+    void this.signalCli.sendTyping(recipient).catch((error: unknown) => {
+      void logError("Signal", "Failed to send typing indicator", error);
+    });
   }
 
   log(args: { event: UmamiEvent; payload?: Record<string, unknown> }) {
