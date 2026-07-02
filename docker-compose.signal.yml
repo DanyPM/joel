@@ -21,7 +21,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - signal-api
+      # wait until signal-cli-rest-api is healthy so the bot's first WebSocket
+      # connect doesn't race the daemon's startup.
+      signal-api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

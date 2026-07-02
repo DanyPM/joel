@@ -99,5 +99,9 @@ await (async () => {
     console.log(`Signal: JOEL started successfully \u{2705}`);
   } catch (error) {
     await logError("Signal", "Failed to start Signal app", error);
+    // Exit non-zero so the container's restart policy recovers, instead of
+    // lingering as a half-started process (e.g. if the rest-api WebSocket was
+    // not yet reachable on first connect).
+    process.exit(1);
   }
 })();
