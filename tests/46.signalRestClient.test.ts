@@ -270,13 +270,13 @@ describe("SignalRestClient polls", () => {
     client.disconnect();
   });
 
-  it("ignores a vote for an unknown poll", async () => {
+  it("surfaces the main menu for a vote on an unknown poll (e.g. after restart)", async () => {
     const client = new SignalRestClient(
       "http://signal-api:8080",
       "+33111111111",
       (url) => new FakeWS(url)
     );
-    const received: unknown[] = [];
+    const received: { envelope: { dataMessage?: { message?: string } } }[] = [];
     client.on("message", (m) => received.push(m));
     const connected = client.connect();
     FakeWS.last.emit("open");
@@ -293,7 +293,9 @@ describe("SignalRestClient polls", () => {
         }
       })
     });
-    expect(received).toHaveLength(0);
+    // Not resolvable -> re-emit as the main-menu label so the user isn't stuck.
+    expect(received).toHaveLength(1);
+    expect(received[0].envelope.dataMessage?.message).toContain("Menu principal");
     client.disconnect();
   });
 });

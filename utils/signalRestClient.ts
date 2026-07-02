@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { KEYBOARD_KEYS } from "../entities/Keyboard.ts";
 
 export interface SignalEnvelopeMessage {
   envelope: {
@@ -249,7 +250,18 @@ export class SignalRestClient extends EventEmitter {
   // close the poll so it can't be voted on again.
   private handlePollVote(vote: SignalPollVote): void {
     const entry = this.pollRegistry.get(vote.targetSentTimestamp);
-    if (entry == null) return;
+    if (entry == null) {
+      // Unknown poll — e.g. one created before a restart, whose answers are no
+      // longer in memory. The vote only carries an index, so the choice can't
+      // be resolved; surface the main menu so the user isn't left stuck.
+      this.emit("message", {
+        envelope: {
+          sourceNumber: vote.sourceNumber,
+          dataMessage: { message: KEYBOARD_KEYS.MAIN_MENU.key.text }
+        }
+      } satisfies SignalEnvelopeMessage);
+      return;
+    }
     const label = entry.answers[vote.optionIndexes[0]];
     if (label == null) return;
 
