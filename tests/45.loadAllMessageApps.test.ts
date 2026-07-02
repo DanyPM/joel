@@ -123,8 +123,12 @@ describe("loadAllMessageApps — Signal", () => {
     ]);
 
     expect(messageApps).toEqual(["Signal"]);
-    // Phone number only: the SDK resolves its bundled signal-cli binary.
-    expect(SignalCliMock).toHaveBeenCalledWith("+33600000000");
+    // Forward-slash CLI path first, phone second (Windows-safe path handling).
+    expect(SignalCliMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/signal-cli(\.bat)?$/),
+      "+33600000000"
+    );
+    expect(SignalCliMock.mock.calls[0][0]).not.toContain("\\");
     expect(signalConnect).toHaveBeenCalledTimes(1);
     expect(messageAppOptions.signalCli).toBeDefined();
   });

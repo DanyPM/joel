@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { createRequire } from "node:module";
+import path from "node:path";
 import {
   MatrixClient,
   SimpleFsStorageProvider,
@@ -49,8 +51,20 @@ export async function loadAllMessageApps(messageApps?: MessageApp[]): Promise<{
   if (messageApps == null || messageApps.some((a) => a === "Signal")) {
     const { SIGNAL_PHONE_NUMBER } = process.env;
     if (SIGNAL_PHONE_NUMBER) {
-      // The SDK resolves its bundled signal-cli binary automatically.
-      const signalCli = new SignalCli(SIGNAL_PHONE_NUMBER);
+      // signal-sdk auto-resolves its bundled binary, but on Windows that path
+      // has backslashes, which the SDK's own validator rejects. Build it with
+      // forward slashes (accepted everywhere) and pass it explicitly. Path
+      // first, phone second: a non-"+" first arg is treated as the CLI path.
+      const require = createRequire(import.meta.url);
+      const signalSdkDir = path.dirname(
+        require.resolve("signal-sdk/package.json")
+      );
+      const binName =
+        process.platform === "win32" ? "signal-cli.bat" : "signal-cli";
+      const signalCliPath = path
+        .join(signalSdkDir, "bin", binName)
+        .replace(/\\/g, "/");
+      const signalCli = new SignalCli(signalCliPath, SIGNAL_PHONE_NUMBER);
       await signalCli.connect();
       resolved.signalCli = signalCli;
       enabledApps.push("Signal");

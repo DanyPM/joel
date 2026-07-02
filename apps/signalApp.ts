@@ -1,5 +1,7 @@
 import "dotenv/config";
 
+import { createRequire } from "node:module";
+import path from "node:path";
 import { SignalCli } from "signal-sdk";
 import { mongodbConnect, mongodbDisconnect } from "../db.ts";
 import { SignalSession } from "../entities/SignalSession.ts";
@@ -8,6 +10,17 @@ import { logError } from "../utils/debugLogger.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 
 const { SIGNAL_PHONE_NUMBER } = process.env;
+
+// signal-sdk auto-resolves its bundled binary, but on Windows the resolved
+// absolute path contains backslashes, which the SDK's own path validator
+// rejects as "unsafe". Build the path with forward slashes (accepted on every
+// platform) so the bot also runs locally on Windows.
+const require = createRequire(import.meta.url);
+const signalSdkDir = path.dirname(require.resolve("signal-sdk/package.json"));
+const binName = process.platform === "win32" ? "signal-cli.bat" : "signal-cli";
+const SIGNAL_CLI_PATH = path
+  .join(signalSdkDir, "bin", binName)
+  .replace(/\\/g, "/");
 
 if (SIGNAL_PHONE_NUMBER === undefined) {
   console.log("Signal: env is not set, bot did not start \u{1F6A9}");
@@ -25,9 +38,9 @@ interface ISignalMessage {
 }
 await (async () => {
   try {
-    // Initialize SignalCli with phone number; the SDK resolves its bundled
-    // signal-cli binary automatically.
-    const signalCli = new SignalCli(SIGNAL_PHONE_NUMBER);
+    // Path first, phone second: the SDK treats a non-"+" first arg as the
+    // signal-cli path and the second as the account number.
+    const signalCli = new SignalCli(SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER);
 
     // Register stopper
     let shuttingDown = false;

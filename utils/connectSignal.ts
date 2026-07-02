@@ -1,5 +1,18 @@
 import "dotenv/config";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { SignalCli } from "signal-sdk";
+
+// signal-sdk auto-resolves its bundled binary, but on Windows the resolved
+// absolute path contains backslashes, which the SDK's own path validator
+// rejects as "unsafe". Build the path ourselves with forward slashes (accepted
+// on every platform) so linking works on Windows too.
+const require = createRequire(import.meta.url);
+const signalSdkDir = path.dirname(require.resolve("signal-sdk/package.json"));
+const binName = process.platform === "win32" ? "signal-cli.bat" : "signal-cli";
+const SIGNAL_CLI_PATH = path
+  .join(signalSdkDir, "bin", binName)
+  .replace(/\\/g, "/");
 
 const {
   SIGNAL_PHONE_NUMBER,
@@ -24,9 +37,9 @@ async function connectDevice() {
   console.log(`Device name: ${SIGNAL_DEVICE_NAME}`);
   console.log("Generating QR code for device linking...\n");
 
-  // Initialize the SDK for linking; the bundled signal-cli binary is resolved
-  // automatically.
-  const signalCli = new SignalCli(SIGNAL_PHONE_NUMBER);
+  // Path first, phone second: the SDK treats a non-"+" first arg as the
+  // signal-cli path and the second as the account number.
+  const signalCli = new SignalCli(SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER);
 
   try {
     // Start device linking with QR code output to console
