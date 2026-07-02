@@ -12,6 +12,12 @@ import type { MessageApp } from "../types.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Capture a single reference time so tasks built with the same
+// `lastEngagementMsAgo` get an *identical* lastEngagementAt. Calling Date.now()
+// per task could straddle a millisecond boundary, making two "equal-edge" tasks
+// unequal and flipping the record-count tiebreak (flaky ordering assertions).
+const NOW = Date.now();
+
 const makeTask = (
   label: string,
   messageApp: MessageApp,
@@ -24,7 +30,7 @@ const makeTask = (
     status: "active",
     hasAccount: true,
     waitingReengagement: false,
-    lastEngagementAt: new Date(Date.now() - lastEngagementMsAgo)
+    lastEngagementAt: new Date(NOW - lastEngagementMsAgo)
   };
   return {
     userId: new Types.ObjectId(),
