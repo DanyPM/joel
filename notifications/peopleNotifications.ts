@@ -1,4 +1,4 @@
-import { FilterQuery, Types } from "mongoose";
+import { QueryFilter, Types } from "mongoose";
 import {
   ExtendedMiniUserInfo,
   ExternalMessageOptions,
@@ -38,23 +38,18 @@ function convertPeopleIdStringsToObjectIds(
   idStrings: string[],
   peopleIdMapByStr: Map<string, Types.ObjectId>
 ): Types.ObjectId[] {
-  const result = idStrings
+  return idStrings
     .map((idStr) => peopleIdMapByStr.get(idStr))
     .filter((id): id is Types.ObjectId => id !== undefined);
-
-  if (result.length !== idStrings.length) {
-    console.log(
-      "Cannot fetch people id from string during the update of user people follows"
-    );
-  }
-
-  return result;
 }
 
 export async function notifyPeopleUpdates(
   updatedRecords: JORFSearchItem[],
   enabledApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions,
+  // Single clock snapshotted at process start, threaded through every handler so
+  // the 24h-window decision can't drift as the (slow) run progresses.
+  windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
 ) {
@@ -89,7 +84,7 @@ export async function notifyPeopleUpdates(
     .lean();
   if (updatedPeopleList.length === 0) return;
 
-  let dbFilters: FilterQuery<IUser> = {
+  let dbFilters: QueryFilter<IUser> = {
     followedPeople: {
       $elemMatch: {
         peopleId: {
@@ -200,7 +195,7 @@ export async function notifyPeopleUpdates(
   if (userUpdateTasks.length === 0) return;
 
   await dispatchTasksToMessageApps<string>(userUpdateTasks, async (task) => {
-    const now = new Date();
+    const now = windowNow;
 
     const reengagementExpired =
       now.getTime() - task.userInfo.lastEngagementAt.getTime() >
@@ -325,7 +320,8 @@ export async function notifyPeopleUpdates(
     const messageSent = await sendPeopleUpdate(
       task.userInfo,
       task.updatedRecordsMap,
-      messageAppsOptions
+      messageAppsOptions,
+      now
     );
     if (!messageSent) return;
 
@@ -362,7 +358,10 @@ export async function notifyPeopleUpdates(
 export async function sendPeopleUpdate(
   userInfo: ExtendedMiniUserInfo,
   updatedRecordMap: Map<string, JORFSearchItem[]>,
-  messageAppsOptions: ExternalMessageOptions
+  messageAppsOptions: ExternalMessageOptions,
+  // Run-wide clock from the notification path; forwarded to the WH guard so it
+  // agrees with the routing decision. Undefined elsewhere → guard uses new Date().
+  windowNow?: Date
 ) {
   if (updatedRecordMap.size === 0) return true;
 
@@ -411,7 +410,8 @@ export async function sendPeopleUpdate(
     ...messageAppsOptions,
     separateMenuMessage: userInfo.messageApp === "WhatsApp",
     useAsyncUmamiLog: true,
-    hasAccount: true
+    hasAccount: true,
+    windowNow
   };
 
   const messageSent = await sendMessage(

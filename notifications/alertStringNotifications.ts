@@ -18,7 +18,7 @@ import {
   NotificationTask,
   dispatchTasksToMessageApps
 } from "./notificationDispatch.ts";
-import { FilterQuery, Types } from "mongoose";
+import { QueryFilter, Types } from "mongoose";
 import { logError } from "../utils/debugLogger.ts";
 import {
   sendWhatsAppTemplate,
@@ -32,12 +32,15 @@ export async function notifyAlertStringUpdates(
   metaRecords: JORFSearchPublication[],
   enabledApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions,
+  // Single clock snapshotted at process start, threaded through every handler so
+  // the 24h-window decision can't drift as the (slow) run progresses.
+  windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
 ) {
   if (metaRecords.length === 0) return;
 
-  let dbFilters: FilterQuery<IUser> = {
+  let dbFilters: QueryFilter<IUser> = {
     "followedMeta.0": { $exists: true },
     status: "active",
     messageApp: { $in: enabledApps }
@@ -115,7 +118,7 @@ export async function notifyAlertStringUpdates(
   await dispatchTasksToMessageApps<string, JORFSearchPublication>(
     userUpdateTasks,
     async (task) => {
-      const now = new Date();
+      const now = windowNow;
 
       const reengagementExpired =
         now.getTime() - task.userInfo.lastEngagementAt.getTime() >
@@ -235,7 +238,8 @@ export async function notifyAlertStringUpdates(
       const messageSent = await sendAlertStringUpdate(
         task.userInfo,
         task.updatedRecordsMap,
-        messageAppsOptions
+        messageAppsOptions,
+        now
       );
       if (!messageSent) return;
 
@@ -264,10 +268,12 @@ export async function notifyAlertStringUpdates(
   );
 }
 
-async function sendAlertStringUpdate(
+export async function sendAlertStringUpdate(
   userInfo: ExtendedMiniUserInfo,
   updatedRecordMap: Map<string, JORFSearchPublication[]>,
-  messageAppsOptions: ExternalMessageOptions
+  messageAppsOptions: ExternalMessageOptions,
+  // Run-wide clock from the notification path; forwarded to the WH guard.
+  windowNow?: Date
 ): Promise<boolean> {
   if (updatedRecordMap.size === 0) return true;
 
@@ -305,7 +311,8 @@ async function sendAlertStringUpdate(
     ...messageAppsOptions,
     separateMenuMessage: userInfo.messageApp === "WhatsApp",
     useAsyncUmamiLog: true,
-    hasAccount: true
+    hasAccount: true,
+    windowNow
   };
 
   const messageSent = await sendMessage(

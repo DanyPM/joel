@@ -7,6 +7,7 @@ import { Types } from "mongoose";
 import pLimit from "p-limit";
 import { MATRIX_API_SENDING_CONCURRENCY } from "../entities/MatrixSession.ts";
 import { ExtendedMiniUserInfo } from "../entities/Session.ts";
+import { logError } from "../utils/debugLogger.ts";
 
 /**
  * Schedules the sendMessage to respect per-app throttling rules.
@@ -50,8 +51,36 @@ export async function dispatchTasksToMessageApps<T, R = JORFSearchItem>(
   const appPromises = [...tasksByMessageApp.keys()].map(async (messageApp) => {
     const appTasks = tasksByMessageApp.get(messageApp) ?? [];
 
-    // this ensures coherent size within batches, so they don't wait too much for each other
-    appTasks.sort((a, b) => b.recordCount - a.recordCount);
+    if (messageApp === "WhatsApp") {
+      // Edge-first: send the users closest to their 24h re-engagement window edge
+      // first, so the slow run reaches them in its first seconds and they keep the
+      // benefit of the scheduler's day-of-week start-advance instead of losing it to
+      // queue latency. Record count is only a tiebreaker here. (lastEngagementAt asc)
+      appTasks.sort(
+        (a, b) =>
+          a.userInfo.lastEngagementAt.getTime() -
+            b.userInfo.lastEngagementAt.getTime() ||
+          b.recordCount - a.recordCount
+      );
+    } else {
+      // this ensures coherent size within batches, so they don't wait too much for each other
+      appTasks.sort((a, b) => b.recordCount - a.recordCount);
+    }
+
+    // Isolate each task: a single send that throws must never reject the
+    // app-level Promise.all and abort the whole run (and every later handler)
+    // for all remaining users. Log and drop only the failing user.
+    const runTask = async (task: NotificationTask<T, R>) => {
+      try {
+        await taskFunction(task);
+      } catch (err) {
+        await logError(
+          messageApp,
+          `Notification task failed for user ${task.userInfo.chatId}`,
+          err
+        );
+      }
+    };
 
     const app_concurrency_limit =
       concurrencyLimitByMessageApp.get(messageApp) ?? 1;
@@ -59,13 +88,11 @@ export async function dispatchTasksToMessageApps<T, R = JORFSearchItem>(
       const limit = pLimit(concurrencyLimitByMessageApp.get(messageApp) ?? 1);
 
       // Wrap each delivery in the limiter
-      await Promise.all(
-        appTasks.map((task) => limit(() => taskFunction(task)))
-      );
+      await Promise.all(appTasks.map((task) => limit(() => runTask(task))));
     } else {
       // if appLimit is 1, just run the taskFunction directly
       for (const task of appTasks) {
-        await taskFunction(task);
+        await runTask(task);
       }
     }
   });

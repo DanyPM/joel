@@ -1,9 +1,10 @@
-import { describe, expect, it } from "@jest/globals";
+import { describe, expect, it } from "vitest";
 import {
   normalizeFrenchText,
   normalizeFrenchTextWithStopwords,
   parsePublicationTitle
 } from "../utils/text.utils.ts";
+import { cleanPeopleName } from "../utils/JORFSearch.utils.ts";
 
 describe("Text Utils - Stopwords and Title Parsing", () => {
   describe("normalizeFrenchTextWithStopwords", () => {
@@ -124,7 +125,7 @@ describe("Text Utils - Stopwords and Title Parsing", () => {
         "Arrêté du 6 janvier 2026 fixant le taux de promotion dans le corps des ingénieurs de l'armement";
 
       // Parse to extract type and cleaned title
-      const { type, cleanedTitle } = parsePublicationTitle(title);
+      const { type } = parsePublicationTitle(title);
       expect(type).toBe("Arrêté");
 
       // Normalize with stopwords
@@ -171,5 +172,40 @@ describe("Text Utils - Stopwords and Title Parsing", () => {
         (standardWordCount - stopwordsWordCount) / standardWordCount;
       expect(reduction).toBeGreaterThanOrEqual(0.4);
     });
+  });
+});
+
+describe("cleanPeopleName", () => {
+  it("returns empty string for empty input", () => {
+    expect(cleanPeopleName("")).toBe("");
+  });
+
+  it("title-cases a simple lowercase name", () => {
+    expect(cleanPeopleName("dupont")).toBe("Dupont");
+  });
+
+  it("strips diacritics", () => {
+    expect(cleanPeopleName("élodie")).toBe("Elodie");
+    expect(cleanPeopleName("Françoise")).toBe("Francoise");
+  });
+
+  it("trims leading and trailing whitespace", () => {
+    expect(cleanPeopleName("  Dupont  ")).toBe("Dupont");
+  });
+
+  it("title-cases after hyphen", () => {
+    expect(cleanPeopleName("jean-luc")).toBe("Jean-Luc");
+  });
+
+  it("title-cases after apostrophe", () => {
+    expect(cleanPeopleName("d'alembert")).toBe("D'Alembert");
+  });
+
+  it("handles all-uppercase input", () => {
+    expect(cleanPeopleName("DUPONT")).toBe("Dupont");
+  });
+
+  it("handles multi-word names", () => {
+    expect(cleanPeopleName("jean pierre martin")).toBe("Jean Pierre Martin");
   });
 });

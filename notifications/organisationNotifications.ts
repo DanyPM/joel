@@ -35,7 +35,7 @@ import {
 } from "./grouping.ts";
 import { getSplitTextMessageSize } from "../utils/text.utils.ts";
 import { logError } from "../utils/debugLogger.ts";
-import { FilterQuery, Types } from "mongoose";
+import { QueryFilter, Types } from "mongoose";
 import {
   sendWhatsAppTemplate,
   WHATSAPP_NEAR_MISS_WINDOW_MS,
@@ -69,6 +69,9 @@ export async function notifyOrganisationsUpdates(
   allUpdatedRecords: JORFSearchItem[],
   enabledApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions,
+  // Single clock snapshotted at process start, threaded through every handler so
+  // the 24h-window decision can't drift as the (slow) run progresses.
+  windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
 ) {
@@ -85,7 +88,7 @@ export async function notifyOrganisationsUpdates(
   }).lean();
   if (updatedOrgsInDb.length === 0) return;
 
-  let dbFilters: FilterQuery<IUser> = {
+  let dbFilters: QueryFilter<IUser> = {
     followedOrganisations: {
       $exists: true,
       $not: { $size: 0 },
@@ -127,7 +130,6 @@ export async function notifyOrganisationsUpdates(
       ({ wikidata_id }) => !!wikidata_id && orgNameById.has(wikidata_id)
     )
   );
-  if (updatedRecordsWithOrgsInDb.length === 0) return;
 
   const updatedOrganisationsbyIdMap = new Map<WikidataId, JORFSearchItem[]>();
 
@@ -193,7 +195,7 @@ export async function notifyOrganisationsUpdates(
   await dispatchTasksToMessageApps<WikidataId>(
     userUpdateTasks,
     async (task) => {
-      const now = new Date();
+      const now = windowNow;
 
       const reengagementExpired =
         now.getTime() - task.userInfo.lastEngagementAt.getTime() >
@@ -317,7 +319,8 @@ export async function notifyOrganisationsUpdates(
         task.userInfo,
         task.updatedRecordsMap,
         orgNameById,
-        messageAppsOptions
+        messageAppsOptions,
+        now
       );
       if (!messageSent) return;
 
@@ -353,7 +356,9 @@ export async function sendOrganisationUpdate(
   userInfo: ExtendedMiniUserInfo,
   organisationsUpdateRecordsMap: Map<WikidataId, JORFSearchItem[]>,
   orgNameById: Map<WikidataId, string>,
-  messageAppsOptions: ExternalMessageOptions
+  messageAppsOptions: ExternalMessageOptions,
+  // Run-wide clock from the notification path; forwarded to the WH guard.
+  windowNow?: Date
 ): Promise<boolean> {
   if (organisationsUpdateRecordsMap.size === 0) return true;
 
@@ -420,7 +425,8 @@ export async function sendOrganisationUpdate(
     ...messageAppsOptions,
     separateMenuMessage: userInfo.messageApp === "WhatsApp",
     useAsyncUmamiLog: true,
-    hasAccount: true
+    hasAccount: true,
+    windowNow
   };
 
   const messageSent = await sendMessage(

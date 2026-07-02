@@ -1,13 +1,18 @@
-import { describe, expect, beforeEach, it } from "@jest/globals";
+import { describe, expect, beforeEach, it } from "vitest";
 import { Publication } from "../models/Publication.ts";
 import mongoose from "mongoose";
 import { normalizeFrenchTextWithStopwords } from "../utils/text.utils.ts";
+
+// Mongoose does not re-create indexes after dropDatabase() because it
+// considers them already initialized. Calling createIndexes() after drop
+// restores all schema-defined indexes for reliable per-test isolation.
 
 describe("Publication Model Test Suite", () => {
   beforeEach(async () => {
     if (!mongoose.connection.db)
       throw new Error("MongoDB connection not established");
     await mongoose.connection.db.dropDatabase();
+    await Publication.createIndexes();
   });
 
   const samplePublication = {
@@ -136,14 +141,13 @@ describe("Publication Model Test Suite", () => {
         title: "Arrêté du 15 janvier 2024"
       });
 
-      expect(publication.normalizedTitleWords).toBeDefined();
-      expect(publication.normalizedTitleWords!.length).toBeGreaterThan(0);
+      const words = publication.normalizedTitleWords;
+      expect(words).toBeDefined();
+      expect(words?.length).toBeGreaterThan(0);
 
       // Verify it's an array of non-empty strings
       expect(
-        publication.normalizedTitleWords!.every(
-          (word) => typeof word === "string" && word.length > 0
-        )
+        words?.every((word) => typeof word === "string" && word.length > 0)
       ).toBe(true);
     });
   });
@@ -156,16 +160,18 @@ describe("Publication Model Test Suite", () => {
       await expect(Publication.create(samplePublication)).rejects.toThrow();
     });
 
-    it("should have indexes on normalizedTitle and normalizedTitleWords", async () => {
-      const indexes = await Publication.collection.getIndexes();
-
-      // Check that normalizedTitle and normalizedTitleWords have indexes
-      const indexNames = Object.keys(indexes);
-      const hasNormalizedTitleIndex = indexNames.some((name) =>
-        name.includes("normalizedTitle")
+    it("should have indexes on normalizedTitle and compound { date_obj: -1, normalizedTitleWords: 1 }", async () => {
+      const indexes = await Publication.collection.indexes();
+      const hasNormalizedTitleIndex = indexes.some(
+        (index) => index.key.normalizedTitle === 1
+      );
+      const hasNormalizedTitleWordsDateIndex = indexes.some(
+        (index) =>
+          index.key.date_obj === -1 && index.key.normalizedTitleWords === 1
       );
 
       expect(hasNormalizedTitleIndex).toBe(true);
+      expect(hasNormalizedTitleWordsDateIndex).toBe(true);
     });
   });
 

@@ -1,5 +1,7 @@
 [![TypeScript](https://badges.frapsoft.com/typescript/code/typescript.svg?v=101)](https://github.com/microsoft/TypeScript)
-[![ESLint](https://github.com/DanyPM/joel_fork/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/fabrahaingo/joel/actions/workflows/main.yml)
+[![Lint](https://github.com/fabrahaingo/joel/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fabrahaingo/joel/actions/workflows/lint.yml)
+[![Tests](https://github.com/fabrahaingo/joel/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/fabrahaingo/joel/actions/workflows/tests.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fabrahaingo/joel/badges/coverage.json)](https://github.com/fabrahaingo/joel/actions/workflows/coverage.yml)
 [![code style: prettier](https://img.shields.io/badge/code_style-prettier-ff69b4.svg?style=flat-square)](https://github.com/prettier/prettier)
 <br />
 [![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
@@ -14,7 +16,7 @@
 <br />
 <p align="center">
   <a href="./img/logo.png">
-    <img src="img/logo.png" alt="Logo" width="100" height="100">
+    <img src="img/logo.png" alt="Logo" width="1142" height="1099">
   </a>
   <h3 align="center">Restez informé·e des nominations au JO de votre réseau, où que vous chattiez 💬</h3>
 </p>
@@ -94,7 +96,7 @@ Pour rechercher une personne, vous pouvez cliquer sur le bouton "🔍 Rechercher
 
 <p align="center">
   <a href="./img/tuto/search.png">
-    <img src="img/tuto/search.png" alt="Logo" width=40% height=40%>
+    <img src="img/tuto/search.png" alt="Logo" width=1125 height=2436>
   </a>
 </p>
 

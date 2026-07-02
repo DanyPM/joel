@@ -8,11 +8,11 @@ import { notifyPeopleUpdates } from "./peopleNotifications.ts";
 import { notifyNameMentionUpdates } from "./nameNotifications.ts";
 import { notifyFunctionTagsUpdates } from "./functionTagNotifications.ts";
 import { notifyAlertStringUpdates } from "./alertStringNotifications.ts";
+import { runReengagementReminderSweep } from "./reengagementReminderSweep.ts";
 import umami from "../utils/umami.ts";
 import mongoose, { Types } from "mongoose";
 
 import { ExternalMessageOptions } from "../entities/Session.ts";
-import { Publication } from "../models/Publication.ts";
 import { refreshTelegramBlockedUsers } from "../entities/TelegramSession.ts";
 import { logError } from "../utils/debugLogger.ts";
 import {
@@ -20,48 +20,6 @@ import {
   getJORFRecordsFromDate
 } from "../utils/JORFSearch.utils.ts";
 import { formatDuration } from "../utils/date.utils.ts";
-import { normalizeFrenchTextWithStopwords } from "../utils/text.utils.ts";
-
-async function saveNewMetaPublications(
-  metaRecords: JORFSearchPublication[]
-): Promise<void> {
-  // 1) Deduplicate within the batch (by normalized JORF id)
-  const byId = new Map<string, JORFSearchPublication>();
-  for (const r of metaRecords) {
-    const key = r.id; // normalize type
-    if (!byId.has(key)) byId.set(key, r);
-  }
-
-  const records = Array.from(byId.entries()).map(([id, doc]) => {
-    const normalizedTitle = normalizeFrenchTextWithStopwords(doc.title);
-    return {
-      ...doc,
-      id: id,
-      normalizedTitle,
-      normalizedTitleWords: normalizedTitle.split(" ").filter(Boolean)
-    };
-  });
-  if (records.length === 0) return;
-
-  // 2) Upsert using $setOnInsert so repeats do not create new docs
-  const ops = records.map((doc) => ({
-    updateOne: {
-      filter: { id: doc.id },
-      update: { $setOnInsert: doc },
-      upsert: true
-    }
-  }));
-
-  const res = await Publication.bulkWrite(ops, { ordered: false });
-
-  // bulkWrite returns how many were actually inserted via upsert
-  if (res.upsertedCount > 0) {
-    await umami.logAsync({
-      event: "/publication-added",
-      payload: { nb: res.upsertedCount }
-    });
-  }
-}
 
 const NOTIFICATION_DURATION_BEFORE_WARNING_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -169,8 +127,15 @@ export async function runNotificationProcess(
       JORFAllRecordsFromDate,
       JORFMetaRecordsFromDate,
       targetApps,
-      messageAppsOptions
+      messageAppsOptions,
+      // `start` is the process-start snapshot; reuse it as the single window clock.
+      start
     );
+
+    // Weekly reminder for WhatsApp users sitting on pending notifications.
+    if (targetApps.includes("WhatsApp")) {
+      await runReengagementReminderSweep(messageAppsOptions);
+    }
 
     const duration_s = Math.ceil(
       (new Date().getTime() - start.getTime()) / 1000
@@ -212,6 +177,10 @@ export async function notifyAllFollows(
   JORFMetaRecordsFromDate: JORFSearchPublication[],
   targetApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions,
+  // One clock for the whole run: every handler judges the 24h window against the
+  // same instant, so a user can't be in-window for handler 1 and expired by
+  // handler 5 just because the run is slow.
+  windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
 ) {
@@ -220,6 +189,7 @@ export async function notifyAllFollows(
       JORFAllRecordsFromDate,
       targetApps,
       messageAppsOptions,
+      windowNow,
       userIds,
       forceWHMessages
     );
@@ -228,6 +198,7 @@ export async function notifyAllFollows(
       JORFAllRecordsFromDate,
       targetApps,
       messageAppsOptions,
+      windowNow,
       userIds,
       forceWHMessages
     );
@@ -236,6 +207,7 @@ export async function notifyAllFollows(
       JORFAllRecordsFromDate,
       targetApps,
       messageAppsOptions,
+      windowNow,
       userIds,
       forceWHMessages
     );
@@ -243,16 +215,17 @@ export async function notifyAllFollows(
     await notifyNameMentionUpdates(
       JORFAllRecordsFromDate,
       targetApps,
-      messageAppsOptions
+      messageAppsOptions,
+      windowNow
     );
   }
 
   if (JORFMetaRecordsFromDate.length > 0) {
-    await saveNewMetaPublications(JORFMetaRecordsFromDate);
     await notifyAlertStringUpdates(
       JORFMetaRecordsFromDate,
       targetApps,
-      messageAppsOptions
+      messageAppsOptions,
+      windowNow
     );
   }
 }

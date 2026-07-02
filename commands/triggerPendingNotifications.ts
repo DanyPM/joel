@@ -9,7 +9,10 @@ import { callJORFSearchReference } from "../utils/JORFSearch.utils.ts";
 import User from "../models/User.ts";
 import { Publication } from "../models/Publication.ts";
 
-const FETCH_CONCURRENCY = 1;
+// Pending refs are re-fetched from JORFSearch on re-engagement. A pending pile
+// can hold hundreds of refs, so fetch a few in parallel rather than serially.
+// callJORFSearchReference already retries with backoff on transient failures.
+const FETCH_CONCURRENCY = 4;
 
 export const triggerPendingNotifications = async (
   session: ISession
@@ -24,11 +27,11 @@ export const triggerPendingNotifications = async (
       await session.sendMessage("Veuillez ajouter un suivi.");
       return;
     }
-    if (session.user.waitingReengagement)
-      await User.updateOne(
-        { _id: session.user._id },
-        { $set: { waitingReengagement: false } }
-      );
+    // Note: the re-engagement flag is cleared atomically together with pending +
+    // reminder count in the single $set below, after notifyAllFollows succeeds.
+    // Clearing it separately up-front left flag:false but pending intact whenever
+    // notifyAllFollows threw. The inbound reset in handleIncomingMessage already
+    // clears the flag on the normal path.
     if (session.user.pendingNotifications.length == 0) {
       await session.sendMessage("Aucune notification en attente.");
       return;
@@ -96,25 +99,30 @@ export const triggerPendingNotifications = async (
       await Publication.find({ source_id: { $in: source_id_publications } });
 
     const candidateJORFSearchItems: JORFSearchItem[] = Array.from(
-      itemsOut.keys()
-    ).reduce((tab: JORFSearchItem[], ref) => {
-      const items = itemsOut.get(ref);
-      if (items != null) return tab.concat(items);
-      return tab;
-    }, []);
+      itemsOut.values()
+    ).flat();
 
     await notifyAllFollows(
       candidateJORFSearchItems,
       candidateJORFPublications,
       [session.messageApp],
       session.extractMessageAppsOptions(),
+      // Immediate re-engagement trigger: window clock is now. (forceWHMessages
+      // below skips the window check anyway, but the param is required.)
+      new Date(),
       [session.user._id],
       true
     );
 
     await User.updateOne(
       { _id: session.user._id },
-      { $set: { waitingReengagement: false, pendingNotifications: [] } }
+      {
+        $set: {
+          waitingReengagement: false,
+          pendingNotifications: [],
+          reengagementReminderCount: 0
+        }
+      }
     );
 
     const earliestInsertDate = session.user.pendingNotifications.reduce(

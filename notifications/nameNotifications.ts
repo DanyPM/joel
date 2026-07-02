@@ -1,4 +1,4 @@
-import { FilterQuery, Types } from "mongoose";
+import { QueryFilter, Types } from "mongoose";
 import {
   ExtendedMiniUserInfo,
   ExternalMessageOptions,
@@ -30,7 +30,7 @@ import { formatDuration, timeDaysBetweenDates } from "../utils/date.utils.ts";
 
 const DEFAULT_GROUP_SEPARATOR = "\n====================\n\n";
 
-async function updateFollowedNamesToFollowedPeople(
+export async function updateFollowedNamesToFollowedPeople(
   userId: Types.ObjectId,
   updatedRecordsMapKeys: string[],
   peopleIdByFollowedNameMap: Map<string, Types.ObjectId>,
@@ -92,10 +92,13 @@ export async function notifyNameMentionUpdates(
   updatedRecords: JORFSearchItem[],
   enabledApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions,
+  // Single clock snapshotted at process start, threaded through every handler so
+  // the 24h-window decision can't drift as the (slow) run progresses.
+  windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
 ) {
-  let dbFilters: FilterQuery<IUser> = {
+  let dbFilters: QueryFilter<IUser> = {
     "followedNames.0": { $exists: true },
     status: "active",
     messageApp: { $in: enabledApps }
@@ -191,7 +194,7 @@ export async function notifyNameMentionUpdates(
   if (userUpdateTasks.length === 0) return;
 
   await dispatchTasksToMessageApps<string>(userUpdateTasks, async (task) => {
-    const now = new Date();
+    const now = windowNow;
 
     const reengagementExpired =
       now.getTime() - task.userInfo.lastEngagementAt.getTime() >
@@ -300,7 +303,8 @@ export async function notifyNameMentionUpdates(
     const messageSent = await sendNameMentionUpdates(
       task.userInfo,
       task.updatedRecordsMap,
-      messageAppsOptions
+      messageAppsOptions,
+      now
     );
 
     if (messageSent) {
@@ -321,7 +325,9 @@ export async function notifyNameMentionUpdates(
 export async function sendNameMentionUpdates(
   userInfo: ExtendedMiniUserInfo,
   updatedRecordMap: Map<string, JORFSearchItem[]>,
-  messageAppsOptions: ExternalMessageOptions
+  messageAppsOptions: ExternalMessageOptions,
+  // Run-wide clock from the notification path; forwarded to the WH guard.
+  windowNow?: Date
 ): Promise<boolean> {
   if (updatedRecordMap.size === 0) return true;
 
@@ -367,7 +373,8 @@ export async function sendNameMentionUpdates(
     ...messageAppsOptions,
     separateMenuMessage: userInfo.messageApp === "WhatsApp",
     useAsyncUmamiLog: true,
-    hasAccount: true
+    hasAccount: true,
+    windowNow
   };
 
   const messageSent = await sendMessage(

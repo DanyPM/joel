@@ -31,7 +31,7 @@ import {
 } from "./grouping.ts";
 import { getSplitTextMessageSize } from "../utils/text.utils.ts";
 import { logError } from "../utils/debugLogger.ts";
-import { FilterQuery, Types } from "mongoose";
+import { QueryFilter, Types } from "mongoose";
 import {
   sendWhatsAppTemplate,
   WHATSAPP_NEAR_MISS_WINDOW_MS,
@@ -88,6 +88,9 @@ export async function notifyFunctionTagsUpdates(
   updatedRecords: JORFSearchItem[],
   enabledApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions,
+  // Single clock snapshotted at process start, threaded through every handler so
+  // the 24h-window decision can't drift as the (slow) run progresses.
+  windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
 ) {
@@ -108,7 +111,7 @@ export async function notifyFunctionTagsUpdates(
 
   const updatedTagSet = new Set<FunctionTags>(updatedTagMap.keys());
 
-  let dbFilters: FilterQuery<IUser> = {
+  let dbFilters: QueryFilter<IUser> = {
     followedFunctions: {
       $exists: true,
       $not: { $size: 0 },
@@ -189,7 +192,7 @@ export async function notifyFunctionTagsUpdates(
   await dispatchTasksToMessageApps<FunctionTags>(
     userUpdateTasks,
     async (task) => {
-      const now = new Date();
+      const now = windowNow;
 
       const reengagementExpired =
         now.getTime() - task.userInfo.lastEngagementAt.getTime() >
@@ -308,7 +311,8 @@ export async function notifyFunctionTagsUpdates(
       const messageSent = await sendTagUpdates(
         task.userInfo,
         task.updatedRecordsMap,
-        messageAppsOptions
+        messageAppsOptions,
+        now
       );
       if (!messageSent) return;
 
@@ -341,7 +345,9 @@ export async function notifyFunctionTagsUpdates(
 export async function sendTagUpdates(
   userInfo: ExtendedMiniUserInfo,
   tagMap: Map<FunctionTags, JORFSearchItem[]>,
-  messageAppsOptions: ExternalMessageOptions
+  messageAppsOptions: ExternalMessageOptions,
+  // Run-wide clock from the notification path; forwarded to the WH guard.
+  windowNow?: Date
 ): Promise<boolean> {
   const tagList = [...tagMap.keys()];
 
@@ -402,7 +408,8 @@ export async function sendTagUpdates(
     ...messageAppsOptions,
     separateMenuMessage: userInfo.messageApp === "WhatsApp",
     useAsyncUmamiLog: true,
-    hasAccount: true
+    hasAccount: true,
+    windowNow
   };
 
   const messageSent = await sendMessage(
