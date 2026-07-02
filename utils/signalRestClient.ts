@@ -17,10 +17,20 @@ export interface WebSocketLike {
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 30_000;
+// Cap on tracked polls so a long-running bot never leaks registry entries.
+const MAX_TRACKED_POLLS = 200;
+
+// A poll vote as it arrives on the receive stream. The vote carries the option
+// index, not the label; the label is recovered from the poll registry.
+export interface SignalPollVote {
+  sourceNumber: string;
+  targetSentTimestamp: string;
+  optionIndexes: number[];
+}
 
 // Parse a signal-cli-rest-api receive frame into the envelope shape the bot
 // consumes. Returns null for anything that is not an actionable text message
-// (receipts, typing, sync, malformed frames).
+// (receipts, typing, sync, poll votes, malformed frames).
 export function parseSignalFrame(data: unknown): SignalEnvelopeMessage | null {
   if (typeof data !== "string") return null;
   let parsed: unknown;
@@ -34,6 +44,40 @@ export function parseSignalFrame(data: unknown): SignalEnvelopeMessage | null {
   return parsed as SignalEnvelopeMessage;
 }
 
+// Parse a poll vote frame. Returns null unless the frame is a well-formed vote.
+export function parsePollVote(data: unknown): SignalPollVote | null {
+  if (typeof data !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  const env = (
+    parsed as {
+      envelope?: {
+        sourceNumber?: string;
+        dataMessage?: {
+          pollVote?: { targetSentTimestamp?: number; optionIndexes?: number[] };
+        };
+      };
+    }
+  )?.envelope;
+  const vote = env?.dataMessage?.pollVote;
+  if (
+    env?.sourceNumber == null ||
+    vote?.targetSentTimestamp == null ||
+    !Array.isArray(vote.optionIndexes)
+  ) {
+    return null;
+  }
+  return {
+    sourceNumber: env.sourceNumber,
+    targetSentTimestamp: String(vote.targetSentTimestamp),
+    optionIndexes: vote.optionIndexes
+  };
+}
+
 export class SignalRestClient extends EventEmitter {
   private readonly apiUrl: string;
   private readonly wsUrl: string;
@@ -43,6 +87,12 @@ export class SignalRestClient extends EventEmitter {
   private reconnectAttempts = 0;
   private intentionalShutdown = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Poll timestamp -> the recipient and ordered answer labels, so an incoming
+  // vote (which carries only the option index) can be resolved back to a label.
+  private readonly pollRegistry = new Map<
+    string,
+    { recipient: string; answers: string[] }
+  >();
 
   constructor(
     apiUrl: string,
@@ -81,7 +131,12 @@ export class SignalRestClient extends EventEmitter {
     });
     ws.addEventListener("message", (ev: { data?: unknown }) => {
       const parsed = parseSignalFrame(ev?.data);
-      if (parsed) this.emit("message", parsed);
+      if (parsed) {
+        this.emit("message", parsed);
+        return;
+      }
+      const vote = parsePollVote(ev?.data);
+      if (vote) this.handlePollVote(vote);
     });
     ws.addEventListener("close", () => {
       this.ws = null;
@@ -121,6 +176,75 @@ export class SignalRestClient extends EventEmitter {
         `signal-cli-rest-api send failed: ${res.status} ${res.statusText} ${body}`.trim()
       );
     }
+  }
+
+  // Send a native Signal poll and remember its answers so an incoming vote can
+  // be mapped back to a label. Returns the poll timestamp (its id).
+  async createPoll(
+    recipient: string,
+    question: string,
+    answers: string[]
+  ): Promise<string> {
+    const res = await fetch(`${this.apiUrl}/v1/polls/${this.phoneNumber}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipient,
+        question,
+        answers,
+        allow_multiple_selections: false
+      })
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `signal-cli-rest-api poll create failed: ${res.status} ${res.statusText} ${body}`.trim()
+      );
+    }
+    const { timestamp } = (await res.json()) as { timestamp: string };
+    // Evict the oldest entry if the registry is full (insertion order).
+    if (this.pollRegistry.size >= MAX_TRACKED_POLLS) {
+      const oldest = this.pollRegistry.keys().next().value;
+      if (oldest !== undefined) this.pollRegistry.delete(oldest);
+    }
+    this.pollRegistry.set(timestamp, { recipient, answers });
+    return timestamp;
+  }
+
+  async closePoll(recipient: string, pollTimestamp: string): Promise<void> {
+    const res = await fetch(`${this.apiUrl}/v1/polls/${this.phoneNumber}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recipient, pollTimestamp })
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `signal-cli-rest-api poll close failed: ${res.status} ${res.statusText} ${body}`.trim()
+      );
+    }
+  }
+
+  // Resolve a vote to its answer label and replay it as a normal inbound
+  // message, so the existing command dispatcher handles the selection. Then
+  // close the poll so it can't be voted on again.
+  private handlePollVote(vote: SignalPollVote): void {
+    const entry = this.pollRegistry.get(vote.targetSentTimestamp);
+    if (entry == null) return;
+    const label = entry.answers[vote.optionIndexes[0]];
+    if (label == null) return;
+
+    this.emit("message", {
+      envelope: {
+        sourceNumber: vote.sourceNumber,
+        dataMessage: { message: label }
+      }
+    } satisfies SignalEnvelopeMessage);
+
+    this.pollRegistry.delete(vote.targetSentTimestamp);
+    void this.closePoll(entry.recipient, vote.targetSentTimestamp).catch(
+      () => undefined
+    );
   }
 
   disconnect(): void {

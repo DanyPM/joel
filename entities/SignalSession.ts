@@ -9,9 +9,20 @@ import {
 import umami, { UmamiEvent, UmamiLogger } from "../utils/umami.ts";
 import { markdown2plainText, splitText } from "../utils/text.utils.ts";
 import { SignalRestClient } from "../utils/signalRestClient.ts";
+import { KEYBOARD_KEYS } from "./Keyboard.ts";
 import { logError } from "../utils/debugLogger.ts";
 
 const SignalMessageApp: MessageApp = "Signal";
+
+// Signal has no reply keyboard, so menus and selections are rendered as native
+// Signal polls. These labels mirror the main-menu keyboard used elsewhere.
+const SIGNAL_MAIN_MENU_LABELS = [
+  KEYBOARD_KEYS.FOLLOWS_LIST.key.text,
+  KEYBOARD_KEYS.FUNCTION_FOLLOW.key.text,
+  KEYBOARD_KEYS.HELP.key.text
+];
+const SIGNAL_MAIN_MENU_PROMPT = "🏠 Menu principal";
+const SIGNAL_SELECT_PROMPT = "👇 Choisissez une option";
 
 export const SIGNAL_MESSAGE_CHAR_LIMIT = 2000;
 const SIGNAL_COOL_DOWN_DELAY_SECONDS = 6;
@@ -75,12 +86,36 @@ export class SignalSession implements ISession {
     formattedData: string,
     options?: MessageSendingOptionsInternal
   ): Promise<boolean> {
-    return await sendSignalAppMessage(
+    const delivered = await sendSignalAppMessage(
       this.signalCli,
       this.chatId,
       formattedData,
       { ...options, useAsyncUmamiLog: false, hasAccount: this.user != null }
     );
+
+    // Render a menu / selection as a native Signal poll. An explicit keyboard
+    // becomes the poll options; separateMenuMessage shows the main menu. A poll
+    // failure never fails the text send.
+    try {
+      let answers: string[] | undefined;
+      let prompt = SIGNAL_SELECT_PROMPT;
+      if (options?.keyboard != null) {
+        answers = options.keyboard.flat().map((k) => k.text);
+      } else if (options?.separateMenuMessage) {
+        answers = SIGNAL_MAIN_MENU_LABELS;
+        prompt = SIGNAL_MAIN_MENU_PROMPT;
+      }
+      if (answers != null && answers.length > 0) {
+        const recipient = this.chatId.startsWith("+")
+          ? this.chatId
+          : "+" + this.chatId;
+        await this.signalCli.createPoll(recipient, prompt, answers);
+      }
+    } catch (error) {
+      await logError("Signal", "Failed to send Signal poll menu", error);
+    }
+
+    return delivered;
   }
 
   extractMessageAppsOptions(): ExternalMessageOptions {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseSignalFrame,
+  parsePollVote,
   SignalRestClient,
   type WebSocketLike
 } from "../utils/signalRestClient.ts";
@@ -136,5 +137,143 @@ describe("SignalRestClient.sendMessage", () => {
     await expect(client.sendMessage("+33600000000", "hi")).rejects.toThrow(
       /send failed: 400/
     );
+  });
+});
+
+describe("parsePollVote", () => {
+  it("parses a vote frame into voter + timestamp + indexes", () => {
+    const frame = JSON.stringify({
+      envelope: {
+        sourceNumber: "+33600000000",
+        dataMessage: {
+          message: null,
+          pollVote: { targetSentTimestamp: 1783018038934, optionIndexes: [2] }
+        }
+      }
+    });
+    expect(parsePollVote(frame)).toEqual({
+      sourceNumber: "+33600000000",
+      targetSentTimestamp: "1783018038934",
+      optionIndexes: [2]
+    });
+  });
+
+  it("returns null for a plain text frame", () => {
+    const frame = JSON.stringify({
+      envelope: { sourceNumber: "+33600000000", dataMessage: { message: "hi" } }
+    });
+    expect(parsePollVote(frame)).toBeNull();
+  });
+});
+
+describe("SignalRestClient polls", () => {
+  it("createPoll POSTs to /v1/polls/{bot} and returns the timestamp", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ timestamp: "1783018038934" }), {
+          status: 201,
+          headers: { "content-type": "application/json" }
+        })
+      );
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      () => new FakeWS("x")
+    );
+    const ts = await client.createPoll("+33600000000", "Menu ?", [
+      "📋 A",
+      "💼 B"
+    ]);
+    expect(ts).toBe("1783018038934");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://signal-api:8080/v1/polls/+33111111111");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      recipient: "+33600000000",
+      question: "Menu ?",
+      answers: ["📋 A", "💼 B"],
+      allow_multiple_selections: false
+    });
+  });
+
+  it("routes a vote to its label as a normal message and closes the poll", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ timestamp: "999" }), {
+        status: 201,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      (url) => new FakeWS(url)
+    );
+    const received: { envelope: { dataMessage?: { message?: string } } }[] = [];
+    client.on("message", (m) => received.push(m));
+
+    const connected = client.connect();
+    FakeWS.last.emit("open");
+    await connected;
+
+    // Register the poll (answers order matters for index -> label).
+    await client.createPoll("+33600000000", "Menu ?", [
+      "📋 Mes suivis",
+      "💼 Fonctions"
+    ]);
+
+    // A vote for index 1 arrives.
+    FakeWS.last.emit("message", {
+      data: JSON.stringify({
+        envelope: {
+          sourceNumber: "+33600000000",
+          dataMessage: {
+            message: null,
+            pollVote: { targetSentTimestamp: 999, optionIndexes: [1] }
+          }
+        }
+      })
+    });
+
+    // Emitted as a normal message carrying the resolved label.
+    expect(received).toHaveLength(1);
+    expect(received[0].envelope.dataMessage?.message).toBe("💼 Fonctions");
+
+    // The poll was closed (DELETE) for the voter.
+    const del = fetchMock.mock.calls.find((c) => c[1]?.method === "DELETE");
+    expect(del).toBeDefined();
+    expect(del?.[0]).toBe("http://signal-api:8080/v1/polls/+33111111111");
+    expect(JSON.parse(String(del?.[1]?.body))).toEqual({
+      recipient: "+33600000000",
+      pollTimestamp: "999"
+    });
+
+    client.disconnect();
+  });
+
+  it("ignores a vote for an unknown poll", async () => {
+    const client = new SignalRestClient(
+      "http://signal-api:8080",
+      "+33111111111",
+      (url) => new FakeWS(url)
+    );
+    const received: unknown[] = [];
+    client.on("message", (m) => received.push(m));
+    const connected = client.connect();
+    FakeWS.last.emit("open");
+    await connected;
+
+    FakeWS.last.emit("message", {
+      data: JSON.stringify({
+        envelope: {
+          sourceNumber: "+33600000000",
+          dataMessage: {
+            message: null,
+            pollVote: { targetSentTimestamp: 12345, optionIndexes: [0] }
+          }
+        }
+      })
+    });
+    expect(received).toHaveLength(0);
+    client.disconnect();
   });
 });

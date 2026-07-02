@@ -30,7 +30,12 @@ import type { SignalRestClient } from "../utils/signalRestClient.ts";
 
 const makeSignalCli = () => {
   const sendMessage = vi.fn(() => Promise.resolve());
-  return { cli: { sendMessage } as unknown as SignalRestClient, sendMessage };
+  const createPoll = vi.fn(() => Promise.resolve("1"));
+  return {
+    cli: { sendMessage, createPoll } as unknown as SignalRestClient,
+    sendMessage,
+    createPoll
+  };
 };
 
 const makeSession = (over: Partial<ISession> = {}): ISession =>
@@ -129,6 +134,32 @@ describe("SignalSession.sendMessage wrapper", () => {
     const res = await session.sendMessage("hello");
     expect(res).toBe(true);
     expect(sendMessage.mock.calls[0][0]).toBe("+33611111111");
+  });
+
+  it("renders an explicit keyboard as a native poll (flattened labels)", async () => {
+    const { cli, createPoll } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    await session.sendMessage("Choisir :", {
+      keyboard: [[{ text: "📋 A" }], [{ text: "💼 B" }, { text: "❓ C" }]]
+    });
+    expect(createPoll).toHaveBeenCalledTimes(1);
+    expect(createPoll.mock.calls[0][0]).toBe("+33600000000");
+    expect(createPoll.mock.calls[0][2]).toEqual(["📋 A", "💼 B", "❓ C"]);
+  });
+
+  it("shows the main menu poll when separateMenuMessage is set", async () => {
+    const { cli, createPoll } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    await session.sendMessage("Aide", { separateMenuMessage: true });
+    expect(createPoll).toHaveBeenCalledTimes(1);
+    expect((createPoll.mock.calls[0][2] as string[]).length).toBeGreaterThan(0);
+  });
+
+  it("sends no poll for a plain message", async () => {
+    const { cli, createPoll } = makeSignalCli();
+    const session = new SignalSession(cli, "BOT", "+33600000000", "fr", new Date());
+    await session.sendMessage("bonjour");
+    expect(createPoll).not.toHaveBeenCalled();
   });
 
   it("extractMessageAppsOptions returns the signalCli", () => {
