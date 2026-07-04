@@ -183,6 +183,8 @@ const UserSchema = new Schema<IUser, UserModel>(
       required: false,
       default: Date.now
     },
+    // Despite the name: last *accepted outbound send* to the user (stamped by
+    // recordSuccessfulDelivery), not an inbound receive. Diagnostics-only.
     lastMessageReceivedAt: {
       type: Date,
       required: false,

@@ -46,17 +46,15 @@ describe("sendWhatsAppMessage — re-engagement guard", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("honors windowNow: a user in-window per windowNow still sends, even if wall-clock drifted past the cutoff", async () => {
-    // Reject the actual API call so we stop right after the guard, before
-    // cooldowns / DB writes — we only need to prove the guard let us through.
-    const sendMessage = vi
-      .fn()
-      .mockRejectedValue(new Error("stop after guard"));
+  it("ignores a stale in-window windowNow: wall clock past the cutoff blocks the send (prevents async 131047)", async () => {
+    const sendMessage = vi.fn();
     const api = { sendMessage } as unknown as WhatsAppAPI;
 
-    // Wall clock: 23h58m ago -> would be rejected by new Date() (past 23h55m).
+    // Wall clock: 23h58m ago -> past the 23h55m cutoff. Meta would reject this
+    // send asynchronously with 131047, so the guard must block it.
     const lastEngagementAt = new Date(Date.now() - (24 * 60 - 2) * MIN_MS);
-    // windowNow: 23h after engagement -> comfortably in window.
+    // windowNow (run-start snapshot): 23h after engagement -> in window. A slow
+    // run makes exactly this divergence; the snapshot must NOT win here.
     const windowNow = new Date(lastEngagementAt.getTime() + 23 * HOUR_MS);
 
     const res = await sendWhatsAppMessage(api, waUser(lastEngagementAt), "hi", {
@@ -64,7 +62,29 @@ describe("sendWhatsAppMessage — re-engagement guard", () => {
       windowNow
     });
 
-    // Guard passed (used windowNow, not wall clock): the API was reached.
+    expect(res).toBe(false);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends when wall clock is in window, even with an expired-looking windowNow snapshot", async () => {
+    // Reject the actual API call so we stop right after the guard, before
+    // cooldowns / DB writes — we only need to prove the guard let us through.
+    const sendMessage = vi
+      .fn()
+      .mockRejectedValue(new Error("stop after guard"));
+    const api = { sendMessage } as unknown as WhatsAppAPI;
+
+    // Wall clock: 1h ago -> comfortably in window.
+    const lastEngagementAt = new Date(Date.now() - HOUR_MS);
+    // windowNow: 25h after engagement -> expired per snapshot, but real time rules.
+    const windowNow = new Date(lastEngagementAt.getTime() + 25 * HOUR_MS);
+
+    const res = await sendWhatsAppMessage(api, waUser(lastEngagementAt), "hi", {
+      hasAccount: true,
+      windowNow
+    });
+
+    // Guard passed (used wall clock, not the stale snapshot): the API was reached.
     expect(sendMessage).toHaveBeenCalledTimes(1);
     // The injected API error is swallowed -> false, never thrown.
     expect(res).toBe(false);

@@ -13,8 +13,7 @@ import User, { USER_SCHEMA_VERSION } from "../models/User.ts";
 import {
   loadUser,
   migrateUser,
-  recordSuccessfulDelivery,
-  messageReceivedTimeHistory
+  recordSuccessfulDelivery
 } from "../entities/Session.ts";
 import type { ISession } from "../types.ts";
 
@@ -165,7 +164,7 @@ describe("migrateUser", () => {
 });
 
 describe("recordSuccessfulDelivery", () => {
-  it("snapshots the previous receive time and marks the user active", async () => {
+  it("stamps the accepted-send time and marks the user active", async () => {
     const previous = new Date(Date.now() - 5 * 60 * 1000);
     await makeUser({
       chatId: "rsd",
@@ -173,9 +172,6 @@ describe("recordSuccessfulDelivery", () => {
       lastMessageReceivedAt: previous
     });
     await recordSuccessfulDelivery("Telegram", "rsd");
-    expect(messageReceivedTimeHistory.get("Telegram:rsd")?.getTime()).toBe(
-      previous.getTime()
-    );
     const refreshed = await User.findOne({
       messageApp: "Telegram",
       chatId: "rsd"

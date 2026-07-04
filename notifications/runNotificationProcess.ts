@@ -21,6 +21,8 @@ import {
 } from "../utils/JORFSearch.utils.ts";
 import { formatDuration } from "../utils/date.utils.ts";
 
+// Ops latency warning only: the WhatsApp send guard re-checks the 24h window
+// in real time at each send, so a slow run no longer risks 131047 errors.
 const NOTIFICATION_DURATION_BEFORE_WARNING_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function runNotificationProcess(

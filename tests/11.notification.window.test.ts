@@ -20,10 +20,12 @@ vi.mock("../utils/umami.ts", () => ({
 }));
 
 import User, { USER_SCHEMA_VERSION } from "../models/User.ts";
+import People from "../models/People.ts";
 import type { ExternalMessageOptions } from "../entities/Session.ts";
 import type { JORFSearchItem } from "../entities/JORFSearchResponse.ts";
 import { FunctionTags } from "../entities/FunctionTags.ts";
 import { notifyFunctionTagsUpdates } from "../notifications/functionTagNotifications.ts";
+import { notifyPeopleUpdates } from "../notifications/peopleNotifications.ts";
 
 const TAG = FunctionTags.Ambassadeur; // "ambassadeur"
 const HOUR_MS = 60 * 60 * 1000;
@@ -136,5 +138,52 @@ describe("notifyFunctionTagsUpdates — windowNow drives the 24h decision", () =
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
     expect(nearMissLogged()).toBe(false);
+  });
+
+  it("sends at most one template per user per run across concurrent handlers", async () => {
+    const lastEngagementAt = new Date();
+    const person = await People.create({ nom: "Dupont", prenom: "Jean" });
+    const user = await createFreshWAUser(lastEngagementAt);
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          followedPeople: [
+            { peopleId: person._id, lastUpdate: new Date("2020-01-01") }
+          ]
+        }
+      }
+    );
+
+    const windowNow = new Date(lastEngagementAt.getTime() + 25 * HOUR_MS);
+    const peopleRecord = {
+      nom: "Dupont",
+      prenom: "Jean",
+      source_id: "JORFTEXT000002",
+      source_date: "2026-06-20",
+      source_name: "JORF",
+      type_ordre: "nomination",
+      organisations: []
+    } as unknown as JORFSearchItem;
+
+    // Both handlers load their user snapshot before either sends: without the
+    // atomic waitingReengagement claim, each would fire its own template.
+    await Promise.all([
+      notifyFunctionTagsUpdates(
+        [tagRecord()],
+        ["WhatsApp"],
+        fakeOptions,
+        windowNow
+      ),
+      notifyPeopleUpdates([peopleRecord], ["WhatsApp"], fakeOptions, windowNow)
+    ]);
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const refreshed = await User.findById(user._id).lean();
+    expect(refreshed?.waitingReengagement).toBe(true);
+    // Updates were stashed as pending (exact count depends on how the two
+    // concurrent read-modify-write stashes interleave; the claim only
+    // guarantees the single template).
+    expect(refreshed?.pendingNotifications.length).toBeGreaterThanOrEqual(1);
   });
 });
