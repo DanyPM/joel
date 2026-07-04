@@ -13,8 +13,6 @@ import { sendMatrixMessage } from "./MatrixSession.ts";
 import umami from "../utils/umami.ts";
 import { logError } from "../utils/debugLogger.ts";
 
-export const messageReceivedTimeHistory = new Map<string, Date>(); // key is ${messageApp}:${chatId}
-
 export interface ExternalMessageOptions {
   matrixClient?: MatrixClient;
   tchapClient?: MatrixClient;
@@ -105,17 +103,6 @@ export async function recordSuccessfulDelivery(
 ): Promise<void> {
   const now = new Date(); // save current time before db operations
 
-  const user: IUser | null = await User.findOne(
-    { messageApp, chatId },
-    { lastMessageReceivedAt: 1 }
-  ).lean();
-  if (user == null) return;
-
-  messageReceivedTimeHistory.set(
-    `${messageApp}:${chatId}`,
-    user.lastMessageReceivedAt
-  );
-  // Update lastMessageReceivedAt
   await User.updateOne(
     { messageApp, chatId },
     { $set: { lastMessageReceivedAt: now, status: "active" } }
@@ -128,10 +115,10 @@ export interface MessageSendingOptionsInternal {
   separateMenuMessage?: boolean;
   useAsyncUmamiLog?: boolean;
   hasAccount?: boolean;
-  // Single run-wide clock for the WhatsApp re-engagement guard. When set (daily
-  // notification path), the guard judges the 24h window against the same instant
-  // the handler used to route free-message-vs-template, so the two can't disagree
-  // mid-run. Left undefined on interactive replies → guard uses new Date().
+  // Single run-wide clock the notification handlers used to route
+  // free-message-vs-template. The WhatsApp send guard itself always re-checks
+  // the 24h window against real time (Meta's clock rules at delivery); this
+  // snapshot is only echoed in the skip log to diagnose mid-run expiries.
   windowNow?: Date;
 }
 

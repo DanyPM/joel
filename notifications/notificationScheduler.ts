@@ -98,7 +98,7 @@ export function computeNextOccurrence(
     }
 
     console.log(
-      `WhatsApp is part of targetApps. Tomorrow is ${nextDayString}. Advancing target time by ${String(timeShiftIndex)}*WH_REENGAGEMENT_WINDOWS_MARGIN`
+      `WhatsApp is part of targetApps. Tomorrow is ${nextDayString}. Advancing target time by ${String(timeShiftIndex)} x ${String(WHATSAPP_SHIFT_STEP_MINS)}min (WHATSAPP_SHIFT_STEP_MINS)`
     );
   }
 

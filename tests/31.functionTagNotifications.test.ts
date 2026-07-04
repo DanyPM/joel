@@ -174,7 +174,7 @@ describe("notifyFunctionTagsUpdates — WhatsApp re-engagement", () => {
     expect(templateSpy).not.toHaveBeenCalled();
   });
 
-  it("does not flag waitingReengagement when the template fails", async () => {
+  it("keeps the waitingReengagement claim when the template fails", async () => {
     templateSpy.mockResolvedValue(false);
     const user = await waUser();
     await notifyFunctionTagsUpdates(
@@ -184,22 +184,22 @@ describe("notifyFunctionTagsUpdates — WhatsApp re-engagement", () => {
       new Date(Date.now() + 25 * HOUR)
     );
     const refreshed = await User.findById(user._id).lean();
-    expect(refreshed?.waitingReengagement).toBe(false);
+    // Claim is kept on failure: pending notifications are stored and the sweep
+    // treats a waiting user without lastReengagementSentAt as immediately due.
+    expect(refreshed?.waitingReengagement).toBe(true);
   });
 
-  it("logs when waitingReengagement is not updated", async () => {
+  it("skips the template when the claim is already taken", async () => {
     await waUser();
-    const spy = vi.spyOn(User, "updateOne").mockResolvedValue(ZERO_UPDATE);
+    // Simulate another handler/run winning the atomic claim first.
+    const spy = vi.spyOn(User, "findOneAndUpdate").mockResolvedValue(null);
     await notifyFunctionTagsUpdates(
       [record()],
       ["WhatsApp"],
       opts,
       new Date(Date.now() + 25 * HOUR)
     );
-    expect(logErrorSpy).toHaveBeenCalledWith(
-      "WhatsApp",
-      expect.stringContaining("No waitingReengagement updated")
-    );
+    expect(templateSpy).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 

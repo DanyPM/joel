@@ -96,6 +96,7 @@ export interface IUser {
     expiresAt: Date;
   };
 
+  // Despite the name: last *accepted outbound send* (see recordSuccessfulDelivery).
   lastMessageReceivedAt: Date;
   lastEngagementAt: Date;
 

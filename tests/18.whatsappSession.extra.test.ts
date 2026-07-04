@@ -37,11 +37,9 @@ import {
   WhatsAppSession,
   TEMPLATE_MESSAGE_COST_EUROS
 } from "../entities/WhatsAppSession.ts";
-import {
-  messageReceivedTimeHistory,
-  type ExtendedMiniUserInfo
-} from "../entities/Session.ts";
+import { type ExtendedMiniUserInfo } from "../entities/Session.ts";
 import User from "../models/User.ts";
+import umami from "../utils/umami.ts";
 import type { ISession } from "../types.ts";
 import type { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 
@@ -97,9 +95,7 @@ describe("handleWhatsAppAPIErrors — terminal user-state codes", () => {
     expect(deleteSpy).toHaveBeenCalledWith("WhatsApp", "chat-2");
   });
 
-  it("restores lastMessageReceivedAt on reengagement-expired (131047)", async () => {
-    const prev = new Date(Date.now() - 3 * HOUR);
-    messageReceivedTimeHistory.set("WhatsApp:chat-3", prev);
+  it("logs and returns false on reengagement-expired (131047) without touching lastMessageReceivedAt", async () => {
     userState.current = {
       lastMessageReceivedAt: new Date(),
       lastEngagementAt: new Date(Date.now() - 25 * HOUR)
@@ -111,9 +107,13 @@ describe("handleWhatsAppAPIErrors — terminal user-state codes", () => {
       vi.fn()
     );
     expect(res).toBe(false);
-    expect(vi.mocked(User.updateOne)).toHaveBeenCalledWith(
-      { messageApp: "WhatsApp", chatId: "chat-3" },
-      { $set: { lastMessageReceivedAt: prev } }
+    expect(logErrorSpy).toHaveBeenCalled();
+    // No rollback: the field records the last accepted send even when Meta
+    // later rejects delivery; nothing computes on it (diagnostics-only).
+    expect(vi.mocked(User.updateOne)).not.toHaveBeenCalled();
+    // The async failure is surfaced to metrics (the sweep counters can't see it).
+    expect(vi.mocked(umami.logAsync)).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "/wh-reengagement-window-expired" })
     );
   });
 
@@ -127,21 +127,6 @@ describe("handleWhatsAppAPIErrors — terminal user-state codes", () => {
     );
     expect(res).toBe(false);
     expect(logErrorSpy).toHaveBeenCalled();
-  });
-
-  it("logs and returns false on 131047 when no receive-time snapshot exists", async () => {
-    messageReceivedTimeHistory.delete("WhatsApp:chat-no-hist");
-    userState.current = {
-      lastMessageReceivedAt: new Date(),
-      lastEngagementAt: new Date(Date.now() - 25 * HOUR)
-    };
-    const res = await handleWhatsAppAPIErrors(
-      { errorCode: 131047 },
-      "test",
-      "chat-no-hist",
-      vi.fn()
-    );
-    expect(res).toBe(false);
   });
 });
 
@@ -210,11 +195,18 @@ describe("sendWhatsAppTemplate", () => {
     const costMatch: unknown = expect.objectContaining({
       cost: TEMPLATE_MESSAGE_COST_EUROS
     });
-    expect(vi.mocked(User.updateOne)).toHaveBeenLastCalledWith(
+    expect(vi.mocked(User.updateOne)).toHaveBeenCalledWith(
       { messageApp: "WhatsApp", chatId: "tpl-1" },
       expect.objectContaining({
         $push: { costHistory: costMatch },
         $inc: { reengagementReminderCount: 1 }
+      })
+    );
+    // recordSuccessfulDelivery stamps the accepted send unconditionally.
+    expect(vi.mocked(User.updateOne)).toHaveBeenLastCalledWith(
+      { messageApp: "WhatsApp", chatId: "tpl-1" },
+      expect.objectContaining({
+        $set: expect.objectContaining({ status: "active" }) as unknown
       })
     );
   });

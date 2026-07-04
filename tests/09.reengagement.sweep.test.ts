@@ -14,8 +14,9 @@ vi.mock("../entities/WhatsAppSession.ts", async (importActual) => {
   };
 });
 
+const { umamiLogAsync } = vi.hoisted(() => ({ umamiLogAsync: vi.fn() }));
 vi.mock("../utils/umami.ts", () => ({
-  default: { log: vi.fn(), logAsync: vi.fn() }
+  default: { log: vi.fn(), logAsync: umamiLogAsync }
 }));
 
 import User, { USER_SCHEMA_VERSION } from "../models/User.ts";
@@ -79,6 +80,7 @@ describe("runReengagementReminderSweep", () => {
     await mongoose.connection.db.dropDatabase();
     sendSpy.mockReset();
     sendSpy.mockResolvedValue(true);
+    umamiLogAsync.mockReset();
     counter = 0;
   });
 
@@ -201,5 +203,24 @@ describe("runReengagementReminderSweep", () => {
 
     // Both users attempted despite the first throwing
     expect(sendSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts a synchronously rejected send as failed, not accepted", async () => {
+    await createWAUser();
+    await createWAUser();
+    sendSpy.mockResolvedValueOnce(false);
+
+    await runReengagementReminderSweep(fakeOptions);
+
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    expect(umamiLogAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "/reengagement-reminder-sweep",
+        payload: expect.objectContaining({
+          accepted: 1,
+          failed: 1
+        }) as unknown
+      })
+    );
   });
 });

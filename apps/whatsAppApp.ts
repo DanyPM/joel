@@ -16,31 +16,15 @@ import { startDailyNotificationJobs } from "../notifications/notificationSchedul
 import { logError, sendTelegramDebugMessage } from "../utils/debugLogger.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 import { getCachedStats } from "../commands/stats.ts";
+import { createTtlDedup } from "../utils/webhookDedup.ts";
 
 const MAX_AGE_SEC = 5 * 60;
 const DUPLICATE_MESSAGE_TTL_MS = MAX_AGE_SEC * 1000;
 
-const processedMessageIds = new Map<string, number>();
-
-function rememberInboundMessage(id: string | undefined): boolean {
-  if (id == null) return false;
-
-  const now = Date.now();
-
-  // prune entries older than the TTL to avoid unbounded growth
-  for (const [knownId, timestamp] of Array.from(processedMessageIds)) {
-    if (now - timestamp > DUPLICATE_MESSAGE_TTL_MS) {
-      processedMessageIds.delete(knownId);
-    }
-  }
-
-  if (processedMessageIds.has(id)) {
-    return true;
-  }
-
-  processedMessageIds.set(id, now);
-  return false;
-}
+const rememberInboundMessage = createTtlDedup(DUPLICATE_MESSAGE_TTL_MS);
+// Statuses need their own window: one message id legitimately emits
+// sent -> delivered -> read, so the dedup key includes the status/error.
+const rememberStatusEvent = createTtlDedup(DUPLICATE_MESSAGE_TTL_MS);
 
 const {
   WHATSAPP_USER_TOKEN,
@@ -367,6 +351,10 @@ await (async function () {
     };
 
     whatsAppAPI.on.status = async ({ id, phone, status, error }) => {
+      // Meta delivers statuses at-least-once: drop redeliveries of the same
+      // status/error for the same message before doing any work. Distinct
+      // statuses for one id (sent -> delivered -> read) pass through.
+      if (rememberStatusEvent(`${id}:${String(error?.code ?? status)}`)) return;
       // Wait for current db operations from message sending workflows to be over before processing the issue
       await new Promise((resolve) => setTimeout(resolve, 5 * 1000));
       const umamiLogger = umami.logAsync;

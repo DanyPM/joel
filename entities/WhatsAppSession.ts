@@ -4,7 +4,6 @@ import {
   ExtendedMiniUserInfo,
   ExternalMessageOptions,
   loadUser,
-  messageReceivedTimeHistory,
   MessageSendingOptionsInternal,
   recordSuccessfulDelivery
 } from "./Session.ts";
@@ -46,12 +45,10 @@ export const WHATSAPP_API_SENDING_CONCURRENCY = 80; // 80 messages per second gl
 export const WHATSAPP_API_VERSION = "v24.0";
 
 // MARGIN RELATIVE TO 24h REENGAGEMENT WINDOW
-// Safety buffer before the real 24h limit: only needs to cover the
-// snapshot->actual-send latency for an edge-first user plus WhatsApp API time.
-// INVARIANT: margin >= max(windowNow snapshot -> actual send latency). The guard
-// decides on the run-start snapshot; the real send happens up to one run-length
-// later, so the margin must cover that gap to keep real sends < 24h (no WH error
-// 131047). Keeping NOTIFICATIONS_SHIFT_DAYS small bounds the run length here.
+// Safety buffer before the real 24h limit. The send guard in
+// sendWhatsAppMessage evaluates real time immediately before each send, so the
+// margin only needs to cover a single message's API latency (guard check ->
+// Meta delivery), not the whole run length. 5 min is generous for that.
 export const WHATSAPP_REENGAGEMENT_MARGIN_MINS = 5; // 5 mins
 
 // Per-day advance applied by the daily scheduler to keep a user who interacted
@@ -250,19 +247,26 @@ export async function sendWhatsAppMessage(
   preSplitChunks?: string[],
   startChunk = 0
 ): Promise<boolean> {
-  // Judge the window against the run-wide snapshot when the notification path
-  // supplies one, so this guard agrees with the routing decision the handler
-  // already made on the same instant. Without it (interactive replies) fall back
-  // to real time. Degrade, never throw: a thrown guard here is uncaught through
-  // the dispatch Promise.all and aborts the entire run for every queued user.
-  const now = options.windowNow ?? new Date();
+  // Judge the window against real time, always. Meta enforces the 24h limit on
+  // its own clock at delivery time; a guard based on the run-start windowNow
+  // snapshot lets a user who was in-window at run start but expired mid-run
+  // (runs can exceed the margin) be sent anyway — Meta accepts synchronously
+  // then fails async with error 131047. options.windowNow stays authoritative
+  // for handler routing/telemetry, but the last-line guard must use Meta's
+  // clock. Degrade, never throw: a thrown guard here is uncaught through the
+  // dispatch Promise.all and aborts the entire run for every queued user.
+  const now = new Date();
   if (
     now.getTime() - userInfo.lastEngagementAt.getTime() >
     WHATSAPP_REENGAGEMENT_TIMEOUT_WITH_MARGIN_MS
   ) {
+    const windowNowInfo =
+      options.windowNow == null
+        ? ""
+        : ` (run windowNow snapshot was ${options.windowNow.toISOString()})`;
     await logError(
       "WhatsApp",
-      `Skipped free message to WH user ${userInfo.chatId} at time ${now.toISOString()}, as his lastEngagement is ${userInfo.lastEngagementAt.toISOString()} (margin is ${String(WHATSAPP_REENGAGEMENT_MARGIN_MINS)}mins). User picked up by re-engagement next run/sweep.`
+      `Skipped free message to WH user ${userInfo.chatId} at time ${now.toISOString()}${windowNowInfo}, as his lastEngagement is ${userInfo.lastEngagementAt.toISOString()} (margin is ${String(WHATSAPP_REENGAGEMENT_MARGIN_MINS)}mins). User picked up by re-engagement next run/sweep.`
     );
     return false;
   }
@@ -486,6 +490,9 @@ export const NOTIFICATION_TEMPLATE = "notification_meta";
 export const FINAL_NOTIFICATION_TEMPLATE =
   process.env.WHATSAPP_FINAL_NOTIFICATION_TEMPLATE ?? NOTIFICATION_TEMPLATE;
 
+// Returns true when Meta *accepts* the request synchronously — NOT delivery.
+// Delivery failures (e.g. 131047, re-engagement window expired) arrive later
+// through the on.status webhook and are handled by handleWhatsAppAPIErrors.
 export async function sendWhatsAppTemplate(
   whatsAppAPI: WhatsAppAPI,
   userInfo: ExtendedMiniUserInfo,
@@ -674,7 +681,8 @@ export async function handleWhatsAppAPIErrors(
         errorMsg +=
           "\nCouldn't find an associated user record in the database.";
       } else {
-        // The message sending time is the recorded last received message (despite being unsuccessful)
+        // lastMessageReceivedAt is the last *accepted outbound send* (see
+        // recordSuccessfulDelivery), i.e. the send Meta later rejected.
         const delaySentMessageSeconds = Math.floor(
           (user.lastMessageReceivedAt.getTime() -
             user.lastEngagementAt.getTime()) /
@@ -684,24 +692,20 @@ export async function handleWhatsAppAPIErrors(
           (now.getTime() - user.lastEngagementAt.getTime()) / 1000
         );
         errorMsg += `\nUser was last active on ${user.lastEngagementAt.toISOString()}
-Last recorded message sent at ${user.lastMessageReceivedAt.toISOString()}: difference is ${String(delaySentMessageSeconds)}secs.
+Last accepted outbound send at ${user.lastMessageReceivedAt.toISOString()}: difference is ${String(delaySentMessageSeconds)}secs.
 Current time is ${now.toISOString()}: difference is ${String(delayNowSeconds)}secs.
 Current WH window margin is ${String(WHATSAPP_REENGAGEMENT_MARGIN_MINS * 60)}secs)`;
-
-        // restore previous lastReceivedAt:
-        const previousMessageReceivedTimeHistory =
-          messageReceivedTimeHistory.get(`WhatsApp:${chatId}`);
-        if (previousMessageReceivedTimeHistory == null) {
-          errorMsg += `\nCouldn't retrieve previous lastMessageReceivedAt for ${chatId}`;
-          await logError("WhatsApp", errorMsg);
-          return false;
-        }
-        await User.updateOne(
-          { messageApp: "WhatsApp", chatId },
-          {
-            $set: { lastMessageReceivedAt: previousMessageReceivedTimeHistory }
+        // Async delivery failures never reach the sweep/notification counters
+        // (those count synchronous API acceptance) — surface them here so
+        // dashboards can reconcile accepted vs actually delivered.
+        await umami.logAsync({
+          event: "/wh-reengagement-window-expired",
+          messageApp: "WhatsApp",
+          payload: {
+            delay_s: delayNowSeconds,
+            sent_delay_s: delaySentMessageSeconds
           }
-        );
+        });
       }
       await logError("WhatsApp", errorMsg, error);
       return false;
