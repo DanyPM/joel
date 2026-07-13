@@ -1,0 +1,50 @@
+name: PR Title
+# Validates that the PR title follows Conventional Commits. Squash-merge
+# makes the PR title the commit subject on `main`; gating titles here keeps
+# `git log` parseable by tools like changelog generators, and backstops the
+# `chore(deps)` / `chore(deps-dev)` / `chore(ci)` prefixes dependabot emits.
+#
+# To make this *blocking*, add it as a required status check in branch
+# protection for `main` (Settings → Branches → main → Require status
+# checks → search "Validate PR title").
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-commit:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Locked-down list — drop anything you wouldn't want to see
+          # in `git log`. Add new types deliberately, never silently.
+          types: |
+            feat
+            fix
+            chore
+            docs
+            refactor
+            test
+            ci
+            build
+            perf
+            style
+            revert
+          requireScope: false
+          # First character of the subject must be a letter (no emoji,
+          # no leading capital-only acronyms ending in punctuation).
+          subjectPattern: ^[A-Za-z].+$
+          subjectPatternError: |
+            The PR title's subject (the part after `type(scope):`) must
+            start with a letter. Example: `feat(api): add export endpoint`.
