@@ -246,6 +246,35 @@ describe("notifyAllFollows — fan-out", () => {
     expect(h.notifyPeople).not.toHaveBeenCalled();
   });
 
+  it("scopes every handler to the requested users", async () => {
+    const userIds = [{ id: "u1" }] as never;
+
+    await notifyAllFollows(
+      [{ source_id: "a" }] as never,
+      [{ id: "m" }] as never,
+      ["Telegram"],
+      {},
+      windowNow,
+      userIds,
+      true
+    );
+
+    // An on-demand trigger notifies one user: a handler left unscoped would
+    // deliver that user's records to everyone else following the same name or
+    // alert string.
+    for (const spy of [
+      h.notifyFn,
+      h.notifyOrg,
+      h.notifyPeople,
+      h.notifyName,
+      h.notifyAlert
+    ]) {
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][4]).toBe(userIds);
+      expect(spy.mock.calls[0][5]).toBe(true);
+    }
+  });
+
   it("runs the later handlers and reports the failure when one throws", async () => {
     const records = [{ source_id: "a" }] as never;
     h.notifyFn.mockRejectedValueOnce(new Error("tags exploded"));

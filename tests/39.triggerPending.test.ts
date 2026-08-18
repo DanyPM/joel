@@ -126,6 +126,13 @@ describe("triggerPendingNotifications", () => {
 
     expect(callRefSpy).toHaveBeenCalledWith("R1", "Telegram");
     expect(notifyAllSpy).toHaveBeenCalled();
+    // Scoped to the triggering user and forced past the WH window: this is an
+    // on-demand delivery, not a broadcast.
+    const notifyArgs = notifyAllSpy.mock.calls[0] as unknown[];
+    expect((notifyArgs[5] as { toString(): string }[])[0].toString()).toBe(
+      user._id.toString()
+    );
+    expect(notifyArgs[6]).toBe(true);
     const refreshed = await User.findById(user._id);
     expect(refreshed?.pendingNotifications.length).toBe(0);
     expect(refreshed?.waitingReengagement).toBe(false);

@@ -281,6 +281,10 @@ export async function notifyAllFollows(
   // same instant, so a user can't be in-window for handler 1 and expired by
   // handler 5 just because the run is slow.
   windowNow: Date,
+  // Restricts every handler to these users. A caller notifying one user on
+  // demand must reach all five handlers, otherwise the unscoped ones deliver
+  // that user's records to everyone else who happens to follow the same name or
+  // alert string, and move their cursors too.
   userIds?: Types.ObjectId[],
   forceWHMessages = false,
   // How far each source is known to be complete. The default suits callers
@@ -342,10 +346,8 @@ export async function notifyAllFollows(
             targetApps,
             messageAppsOptions,
             windowNow,
-            // `userIds` / `forceWHMessages` are deliberately not forwarded here:
-            // this handler has always run unscoped and unforced.
-            undefined,
-            false,
+            userIds,
+            forceWHMessages,
             coverageCursors.records
           )
       }
@@ -361,9 +363,8 @@ export async function notifyAllFollows(
           targetApps,
           messageAppsOptions,
           windowNow,
-          // Unscoped and unforced, as this handler has always been called.
-          undefined,
-          false,
+          userIds,
+          forceWHMessages,
           coverageCursors.meta
         )
     });
