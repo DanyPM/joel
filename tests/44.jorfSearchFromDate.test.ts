@@ -26,7 +26,8 @@ vi.mock("../utils/umami.ts", () => ({
   default: { log: umamiLogSpy, logAsync: umamiLogAsyncSpy }
 }));
 vi.mock("../utils/debugLogger.ts", () => ({
-  logError: vi.fn(() => Promise.resolve())
+  logError: vi.fn(() => Promise.resolve()),
+  logErrorForApps: vi.fn(() => Promise.resolve())
 }));
 
 import {
@@ -55,6 +56,16 @@ function rawMeta(date: string) {
     title: "Titre de test",
     tags: { mesure_nominative: true }
   };
+}
+
+// Mirrors RETRY_MAX in JORFSearch.utils.ts.
+const RETRY_MAX = 5;
+
+// The day URL for the "records" endpoint is keyed on DD-MM-YYYY.
+function dmy(d: Date): string {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${String(d.getFullYear())}`;
 }
 
 function ymdMinusOneDay(ymd: string): string {
@@ -87,12 +98,13 @@ describe("getJORFRecordsFromDate", () => {
     const startDate = new Date(today);
     startDate.setDate(today.getDate() - 2); // 3-day range => 3 chunks of size 1
 
-    const results = await getJORFRecordsFromDate(startDate, [
-      "Telegram",
-      "Signal"
-    ]);
+    const { items: results, failedDates } = await getJORFRecordsFromDate(
+      startDate,
+      ["Telegram", "Signal"]
+    );
 
     // One record per day -> 3 total, sorted ascending by source_date.
+    expect(failedDates).toEqual([]);
     expect(results).toHaveLength(3);
     expect(getSpy).toHaveBeenCalledTimes(3);
     for (let i = 1; i < results.length; i++) {
@@ -110,15 +122,82 @@ describe("getJORFRecordsFromDate", () => {
     ).toBe(3);
   });
 
-  it("tolerates a day returning a null/string payload", async () => {
+  it("tolerates a day returning a null/string payload and reports it as failed", async () => {
     getSpy.mockResolvedValue({ data: "error string", request: {} });
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const results = await getJORFRecordsFromDate(new Date(today), ["Telegram"]);
+    const result = await getJORFRecordsFromDate(new Date(today), ["Telegram"]);
 
-    expect(results).toEqual([]);
+    expect(result.items).toEqual([]);
+    expect(result.requestedDays).toBe(1);
+    expect(result.failedDates).toHaveLength(1);
     expect(getSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the days that succeeded when another day fails", async () => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() - 1); // 2-day range
+
+    const todayDMY = dmy(today);
+    getSpy.mockImplementation((url: string) => {
+      const m = /(\d{2})-(\d{2})-(\d{4})/.exec(url);
+      // Today is fetched first (the range walks backwards); fail the older day.
+      if (m?.[0] !== todayDMY)
+        return Promise.resolve({ data: "error string", request: {} });
+      const ymd = `${m[3]}-${m[2]}-${m[1]}`;
+      return Promise.resolve({ data: [rawItem(ymd)], request: {} });
+    });
+
+    const result = await getJORFRecordsFromDate(startDate, ["Telegram"]);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.requestedDays).toBe(2);
+    expect(result.failedDates).toHaveLength(1);
+  });
+
+  it("stops requesting further days once JORFSearch is unreachable", async () => {
+    getSpy.mockRejectedValue(
+      Object.assign(new Error("connect ECONNREFUSED"), {
+        isAxiosError: true,
+        toJSON: () => ({})
+      })
+    );
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() - 3); // 4-day range
+
+    // Fake timers so the retry back-off does not cost the test its wall-clock.
+    vi.useFakeTimers();
+    let result;
+    try {
+      const pending = getJORFRecordsFromDate(startDate, ["Telegram"]);
+      await vi.runAllTimersAsync();
+      result = await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(result.items).toEqual([]);
+    // Every day is reported missing, but only the first one burned its retries.
+    expect(result.failedDates).toHaveLength(4);
+    expect(getSpy).toHaveBeenCalledTimes(RETRY_MAX + 1);
+  });
+
+  it("does not mutate the caller's startDate", async () => {
+    getSpy.mockResolvedValue({ data: [], request: {} });
+
+    const startDate = new Date();
+    startDate.setHours(13, 45, 30, 0);
+    const before = startDate.getTime();
+
+    await getJORFRecordsFromDate(startDate, ["Telegram"]);
+
+    expect(startDate.getTime()).toBe(before);
   });
 });
 
@@ -138,7 +217,9 @@ describe("getJORFMetaRecordsFromDate", () => {
     const startDate = new Date(today);
     startDate.setDate(today.getDate() - 2); // 3 chunks of size 1
 
-    const results = await getJORFMetaRecordsFromDate(startDate, ["Telegram"]);
+    const { items: results } = await getJORFMetaRecordsFromDate(startDate, [
+      "Telegram"
+    ]);
 
     expect(results).toHaveLength(3);
     expect(getSpy).toHaveBeenCalledTimes(3);
@@ -159,13 +240,17 @@ describe("getJORFMetaRecordsFromDate", () => {
     expect(umamiLogAsyncSpy).toHaveBeenCalled();
   });
 
-  it("throws when a day returns a null/string payload", async () => {
+  it("reports a failed day instead of throwing", async () => {
     getSpy.mockResolvedValue({ data: "error string", request: {} });
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    await expect(
-      getJORFMetaRecordsFromDate(new Date(today), ["Telegram"])
-    ).rejects.toThrow("JORFSearch returned a null value");
+    const result = await getJORFMetaRecordsFromDate(new Date(today), [
+      "Telegram"
+    ]);
+
+    expect(result.items).toEqual([]);
+    expect(result.requestedDays).toBe(1);
+    expect(result.failedDates).toHaveLength(1);
   });
 });

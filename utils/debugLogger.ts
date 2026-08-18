@@ -67,7 +67,13 @@ console.info = (...args: unknown[]) => {
 const formatError = (error: unknown): string | null => {
   if (error == null) return null;
   if (error instanceof Error) {
-    return `${error.name}: ${error.message}${error.stack ? `\n${error.stack}` : ""}`;
+    const header = `${error.name}: ${error.message}`;
+    // V8 stacks already start with "Name: message"; only prepend the header when
+    // the runtime omitted it, otherwise every alert repeats its first line.
+    if (error.stack == null) return header;
+    return error.stack.startsWith(header)
+      ? error.stack
+      : `${header}\n${error.stack}`;
   }
   if (typeof error === "string") return error;
   try {
@@ -176,7 +182,9 @@ const logToConsole = (
 
 const buildLogMessage = (
   level: LogLevel,
-  messageApp: MessageApp,
+  // Free-form label: a single MessageApp, or a comma-joined list when one
+  // failure affects several apps.
+  messageApp: string,
   message: string,
   error?: unknown
 ): string => {
@@ -211,5 +219,32 @@ export const logError = async (
   umami.log({ event: "/console-log", messageApp });
   await sendTelegramDebugMessage(
     buildLogMessage("error", messageApp, message, error)
+  );
+};
+
+/**
+ * Reports a single failure that affects several apps at once (a shared
+ * dependency being down, for instance). Emits one Telegram alert naming every
+ * affected app instead of one alert per app: `sendTelegramDebugMessage` sleeps
+ * {@link TELEGRAM_COOL_DOWN_DELAY_SECONDS} between sends, so fanning a shared
+ * failure out per app both spams the channel and stalls the caller.
+ * Umami still records one event per app so per-app error rates stay comparable.
+ */
+export const logErrorForApps = async (
+  messageApps: MessageApp[],
+  message: string,
+  error?: unknown
+): Promise<void> => {
+  if (messageApps.length === 0) return;
+  if (messageApps.length === 1) {
+    await logError(messageApps[0], message, error);
+    return;
+  }
+  logToConsole("error", message, error);
+  for (const messageApp of messageApps) {
+    umami.log({ event: "/console-log", messageApp });
+  }
+  await sendTelegramDebugMessage(
+    buildLogMessage("error", messageApps.join(", "), message, error)
   );
 };
