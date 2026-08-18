@@ -59,7 +59,7 @@ async function fetchRange<T>(
   fetch: () => Promise<JORFRangeResult<T>>,
   targetApps: MessageApp[],
   windowNow: Date
-): Promise<{ items: T[]; coverageCursor: Date }> {
+): Promise<{ items: T[]; coverageCursor: Date; degraded: boolean }> {
   let range: JORFRangeResult<T>;
   try {
     range = await fetch();
@@ -69,11 +69,11 @@ async function fetchRange<T>(
       `Could not fetch JORF ${label}: the matching notifications are skipped for this run.`,
       error
     );
-    return { items: [], coverageCursor: windowNow };
+    return { items: [], coverageCursor: windowNow, degraded: true };
   }
 
   if (range.failedDates.length === 0) {
-    return { items: range.items, coverageCursor: windowNow };
+    return { items: range.items, coverageCursor: windowNow, degraded: false };
   }
 
   const allDaysFailed = range.failedDates.length === range.requestedDays;
@@ -88,7 +88,8 @@ async function fetchRange<T>(
   // handlers no-op on an empty list either way.
   return {
     items: allDaysFailed ? [] : range.items,
-    coverageCursor: coverageCursorFor(windowNow, range.failedDates)
+    coverageCursor: coverageCursorFor(windowNow, range.failedDates),
+    degraded: true
   };
 }
 
@@ -96,12 +97,64 @@ async function fetchRange<T>(
 // in real time at each send, so a slow run no longer risks 131047 errors.
 const NOTIFICATION_DURATION_BEFORE_WARNING_MS = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * How a scheduled cycle ended.
+ *
+ * - `completed`: every source fetched and every handler ran.
+ * - `degraded`: the run delivered what it could, but something was skipped.
+ * - `failed`: the run aborted on an unexpected error.
+ * - `skipped`: the cycle did no work (a client was missing, or the previous run
+ *   was still going).
+ */
+export type NotificationOutcome =
+  "completed" | "degraded" | "failed" | "skipped";
+
+/**
+ * Records the end of one scheduled cycle, once per app.
+ *
+ * Every cycle emits exactly one event per app whatever happens to it, so a
+ * missing event means the process was not running: no other reading is
+ * possible. That only holds if the send itself is verified, hence
+ * `logAsyncVerified` and the alert when it fails.
+ */
+export async function logNotificationOutcome(
+  targetApps: MessageApp[],
+  outcome: NotificationOutcome,
+  duration_s: number,
+  degradations: string[] = []
+): Promise<void> {
+  const unreported: MessageApp[] = [];
+  for (const messageApp of targetApps) {
+    const reported = await umami.logAsyncVerified({
+      event: "/notification-process-completed",
+      messageApp,
+      hasAccount: true,
+      payload: {
+        duration_s,
+        outcome,
+        degraded_steps: degradations.join(" | ")
+      }
+    });
+    if (!reported) unreported.push(messageApp);
+  }
+
+  if (unreported.length > 0) {
+    await logErrorForApps(
+      unreported,
+      `Umami did not record the end of the notification process (outcome: ${outcome}). The run itself is unaffected, but its telemetry is missing.`
+    );
+  }
+}
+
 export async function runNotificationProcess(
   targetApps: MessageApp[],
   messageAppsOptions: ExternalMessageOptions
 ): Promise<void> {
   const start = new Date();
   console.log("Notification started.");
+  // Whatever happens below, the `finally` reports one outcome per app.
+  let outcome: NotificationOutcome = "skipped";
+  const degradations: string[] = [];
   try {
     if (
       targetApps.some((a) => a === "Matrix") &&
@@ -150,7 +203,18 @@ export async function runNotificationProcess(
     if (mongoose.connection.readyState.valueOf() != 1) await mongodbConnect();
 
     if (targetApps.includes("Telegram")) {
-      await refreshTelegramBlockedUsers(messageAppsOptions.telegramBotToken);
+      try {
+        await refreshTelegramBlockedUsers(messageAppsOptions.telegramBotToken);
+      } catch (error) {
+        // Only costs us the chance to skip users who already blocked the bot:
+        // their sends fail individually and are handled per user.
+        degradations.push("Telegram blocked-user refresh");
+        await logError(
+          "Telegram",
+          "Could not refresh the Telegram blocked-user list; sends to blocked users will fail individually",
+          error
+        );
+      }
     }
 
     // Number of days to go back: 0 means we just fetch today's info
@@ -216,7 +280,11 @@ export async function runNotificationProcess(
         meta: metaRecords.coverageCursor
       }
     );
+    if (records.degraded) degradations.push("JORF records fetch");
+    if (metaRecords.degraded) degradations.push("JORF meta fetch");
+
     if (failedHandlers.length > 0) {
+      degradations.push(...failedHandlers.map((h) => `${h} handler`));
       await logErrorForApps(
         targetApps,
         `Notification handlers failed and were skipped: ${failedHandlers.join(", ")}. Other handlers ran normally.`
@@ -229,6 +297,7 @@ export async function runNotificationProcess(
       try {
         await runReengagementReminderSweep(messageAppsOptions);
       } catch (error) {
+        degradations.push("re-engagement reminder sweep");
         await logError(
           "WhatsApp",
           "Error running the re-engagement reminder sweep",
@@ -237,38 +306,32 @@ export async function runNotificationProcess(
       }
     }
 
-    const duration_s = Math.ceil(
-      (new Date().getTime() - start.getTime()) / 1000
+    outcome = degradations.length > 0 ? "degraded" : "completed";
+  } catch (err) {
+    outcome = "failed";
+    await logErrorForApps(
+      targetApps,
+      "Error running notification process: ",
+      err
+    );
+  } finally {
+    const delay = new Date().getTime() - start.getTime();
+    await logNotificationOutcome(
+      targetApps,
+      outcome,
+      Math.ceil(delay / 1000),
+      degradations
     );
 
-    for (const appType of targetApps) {
-      await umami.logAsync({
-        event: "/notification-process-completed",
-        messageApp: appType,
-        hasAccount: true,
-        payload: { duration_s }
-      });
+    if (delay > NOTIFICATION_DURATION_BEFORE_WARNING_MS) {
+      await logErrorForApps(
+        targetApps,
+        `Notification process took too long: ${formatDuration(delay)}.`
+      );
     }
-
-    const end = new Date();
-
-    const delay = end.getTime() - start.getTime();
-    if (
-      end.getTime() - start.getTime() >
-      NOTIFICATION_DURATION_BEFORE_WARNING_MS
-    ) {
-      for (const appType of targetApps) {
-        await logError(
-          appType,
-          `Notification process took too long: ${formatDuration(delay)}.`
-        );
-      }
-    }
-    console.log(`Notification ended: took ${formatDuration(delay)}.`);
-  } catch (err) {
-    for (const appType of targetApps) {
-      await logError(appType, "Error running notification process: ", err);
-    }
+    console.log(
+      `Notification ended (${outcome}): took ${formatDuration(delay)}.`
+    );
   }
 }
 

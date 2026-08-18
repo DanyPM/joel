@@ -11,6 +11,7 @@ function emptyRange() {
 const h = vi.hoisted(() => ({
   logErrorSpy: vi.fn(() => Promise.resolve()),
   logErrorForAppsSpy: vi.fn(() => Promise.resolve()),
+  umamiVerifiedSpy: vi.fn(() => Promise.resolve(true)),
   getRecords: vi.fn(() => Promise.resolve(emptyRange())),
   getMeta: vi.fn(() => Promise.resolve(emptyRange())),
   refreshBlocked: vi.fn(() => Promise.resolve()),
@@ -37,7 +38,11 @@ vi.mock("mongoose", () => {
 });
 vi.mock("../db.ts", () => ({ mongodbConnect: vi.fn(() => Promise.resolve()) }));
 vi.mock("../utils/umami.ts", () => ({
-  default: { log: vi.fn(), logAsync: vi.fn(() => Promise.resolve()) }
+  default: {
+    log: vi.fn(),
+    logAsync: vi.fn(() => Promise.resolve()),
+    logAsyncVerified: h.umamiVerifiedSpy
+  }
 }));
 vi.mock("../utils/debugLogger.ts", () => ({
   logError: h.logErrorSpy,
@@ -78,6 +83,7 @@ import type { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.umamiVerifiedSpy.mockResolvedValue(true);
   h.getRecords.mockResolvedValue(emptyRange());
   h.getMeta.mockResolvedValue(emptyRange());
 });
@@ -219,8 +225,8 @@ describe("runNotificationProcess — full run", () => {
     } finally {
       vi.useRealTimers();
     }
-    expect(h.logErrorSpy).toHaveBeenCalledWith(
-      "Telegram",
+    expect(h.logErrorForAppsSpy).toHaveBeenCalledWith(
+      ["Telegram"],
       expect.stringContaining("took too long")
     );
   });
@@ -291,6 +297,93 @@ describe("notifyAllFollows — fan-out", () => {
     for (const spy of [h.notifyOrg, h.notifyPeople, h.notifyName]) {
       expect(spy).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe("runNotificationProcess — outcome reporting", () => {
+  const outcomeOf = (call: unknown[]) =>
+    (call[0] as { payload: { outcome: string } }).payload.outcome;
+
+  it("reports completed on a clean run", async () => {
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+    expect(h.umamiVerifiedSpy).toHaveBeenCalledTimes(1);
+    expect(outcomeOf(h.umamiVerifiedSpy.mock.calls[0])).toBe("completed");
+  });
+
+  it("reports degraded and names the step when a fetch had a gap", async () => {
+    h.getRecords.mockResolvedValueOnce({
+      items: [{ source_id: "a" }],
+      requestedDays: 2,
+      failedDates: ["2026-08-17"]
+    });
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+
+    const call = h.umamiVerifiedSpy.mock.calls[0][0] as {
+      payload: { outcome: string; degraded_steps: string };
+    };
+    expect(call.payload.outcome).toBe("degraded");
+    expect(call.payload.degraded_steps).toContain("JORF records fetch");
+  });
+
+  it("reports degraded when a handler failed", async () => {
+    h.getRecords.mockResolvedValueOnce({
+      items: [{ source_id: "a" }],
+      requestedDays: 1,
+      failedDates: []
+    });
+    h.notifyPeople.mockRejectedValueOnce(new Error("boom"));
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+
+    const call = h.umamiVerifiedSpy.mock.calls[0][0] as {
+      payload: { outcome: string; degraded_steps: string };
+    };
+    expect(call.payload.outcome).toBe("degraded");
+    expect(call.payload.degraded_steps).toContain("people handler");
+  });
+
+  it("still reports when the run aborts", async () => {
+    h.refreshBlocked.mockImplementationOnce(() => {
+      throw new Error("unexpected");
+    });
+    h.getRecords.mockRejectedValueOnce(new Error("and again"));
+    h.getMeta.mockRejectedValueOnce(new Error("and again"));
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+    expect(h.umamiVerifiedSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports skipped when a client is missing, so the cycle is still counted", async () => {
+    await runNotificationProcess(["Telegram"], {});
+    expect(outcomeOf(h.umamiVerifiedSpy.mock.calls[0])).toBe("skipped");
+  });
+
+  it("reports once per targeted app", async () => {
+    await runNotificationProcess(["Telegram", "Matrix"], {
+      telegramBotToken: "TOK",
+      matrixClient: {} as never
+    });
+    expect(h.umamiVerifiedSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("raises an alert when umami does not record the event", async () => {
+    h.umamiVerifiedSpy.mockResolvedValue(false);
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+    expect(h.logErrorForAppsSpy).toHaveBeenCalledWith(
+      ["Telegram"],
+      expect.stringContaining("Umami did not record")
+    );
+  });
+
+  it("survives a blocked-user refresh failure and marks the run degraded", async () => {
+    h.refreshBlocked.mockRejectedValueOnce(new Error("telegram down"));
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+
+    const call = h.umamiVerifiedSpy.mock.calls[0][0] as {
+      payload: { outcome: string; degraded_steps: string };
+    };
+    expect(call.payload.outcome).toBe("degraded");
+    expect(call.payload.degraded_steps).toContain("blocked-user refresh");
+    // The run went on to fetch rather than aborting.
+    expect(h.getRecords).toHaveBeenCalledTimes(1);
   });
 });
 
