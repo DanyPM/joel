@@ -25,39 +25,39 @@
   },
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.18.1",
-    "concurrently": "^10.0.3",
+    "axios": "^1.19.0",
+    "concurrently": "^10.0.5",
     "dotenv": "^17.4.2",
     "emoji-regex": "^10.6.0",
     "express": "^5.2.1",
     "matrix-bot-sdk": "^0.8.0",
     "mongodb": "^7.5.0",
-    "mongoose": "^9.7.4",
+    "mongoose": "^9.9.2",
     "nodemon": "^3.1.14",
-    "p-limit": "^7.3.0",
+    "p-limit": "^7.3.1",
     "telegraf": "^4.16.3",
-    "tsx": "^4.23.0",
-    "whatsapp-api-js": "^6.2.1"
+    "tsx": "^4.23.12",
+    "whatsapp-api-js": "^6.2.2"
   },
   "overrides": {
     "form-data": "^4.0.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@ngrok/ngrok": "^1.7.0",
     "@telegraf/types": "^9.2.1",
-    "@tsconfig/node24": "^24.0.4",
+    "@tsconfig/node24": "^24.0.5",
     "@types/express": "^5.0.6",
     "@vitest/coverage-v8": "^4.1.10",
-    "eslint": "^10.7.0",
+    "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.6",
     "lefthook": "^2.1.10",
     "mongodb-memory-server": "^11.2.0",
-    "@ngrok/ngrok": "^1.7.0",
-    "npm-check-updates": "^22.2.9",
-    "prettier": "^3.9.5",
+    "npm-check-updates": "^23.0.2",
+    "prettier": "^3.9.6",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.63.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.10"
   }
 }
