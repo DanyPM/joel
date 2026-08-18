@@ -157,6 +157,18 @@ export async function notifyAlertStringUpdates(
             );
             return;
           }
+          // Atomically claim the template send before sending: our snapshot of
+          // waitingReengagement is stale by now — another handler in this run
+          // may already have templated this user. On send failure the claim is
+          // kept on purpose: pending notifications are already stored and the
+          // sweep treats a waiting user without lastReengagementSentAt as
+          // immediately due, so the template goes out next daily sweep at the
+          // latest.
+          const claimed = await User.findOneAndUpdate(
+            { _id: task.userId, waitingReengagement: { $ne: true } },
+            { $set: { waitingReengagement: true } }
+          );
+          if (claimed == null) return; // already claimed by another handler/run
           const templateSent = await sendWhatsAppTemplate(
             whatsAppAPI,
             task.userInfo,
@@ -164,17 +176,6 @@ export async function notifyAlertStringUpdates(
             messageAppsOptions
           );
           if (!templateSent) return;
-
-          const res = await User.updateOne(
-            { _id: task.userId },
-            { $set: { waitingReengagement: true } }
-          );
-          if (res.modifiedCount === 0) {
-            await logError(
-              task.userInfo.messageApp,
-              `No waitingReengagement updated for user ${task.userId.toString()} after sending function WH template on text update`
-            );
-          }
 
           // If near miss (user engaged very recently)
           if (

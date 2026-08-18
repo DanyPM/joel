@@ -12,12 +12,7 @@ export interface CommandType {
 }
 
 export type MessageApp =
-  | "Telegram"
-  | "WhatsApp"
-  | "Signal"
-  | "Matrix"
-  | "Tchap"
-  | "debug";
+  "Telegram" | "WhatsApp" | "Signal" | "Matrix" | "Tchap" | "debug";
 
 export type JORFReference = string;
 
@@ -44,11 +39,7 @@ export interface ISession {
 }
 
 export type NotificationType =
-  | "people"
-  | "name"
-  | "function"
-  | "organisation"
-  | "meta";
+  "people" | "name" | "function" | "organisation" | "meta";
 
 // fields are undefined for users created before implementation
 export interface IUser {
@@ -96,6 +87,7 @@ export interface IUser {
     expiresAt: Date;
   };
 
+  // Despite the name: last *accepted outbound send* (see recordSuccessfulDelivery).
   lastMessageReceivedAt: Date;
   lastEngagementAt: Date;
 

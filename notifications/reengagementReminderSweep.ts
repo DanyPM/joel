@@ -131,7 +131,10 @@ export async function runReengagementReminderSweep(
 
   const limit = pLimit(WHATSAPP_API_SENDING_CONCURRENCY);
 
-  let sentCount = 0;
+  // acceptedCount counts synchronous API acceptance, not delivery: Meta may
+  // still reject an accepted template asynchronously (e.g. 131047 via the
+  // on.status webhook), which is tracked separately by handleWhatsAppAPIErrors.
+  let acceptedCount = 0;
   let failedCount = 0;
 
   await Promise.all(
@@ -159,15 +162,15 @@ export async function runReengagementReminderSweep(
 
           // sendWhatsAppTemplate stamps lastReengagementSentAt and increments
           // reengagementReminderCount on success (see WhatsAppSession.ts).
-          const sent = await sendWhatsAppTemplate(
+          const accepted = await sendWhatsAppTemplate(
             whatsAppAPI,
             userInfo,
             "meta",
             messageAppsOptions,
             templateName
           );
-          if (sent) {
-            sentCount++;
+          if (accepted) {
+            acceptedCount++;
           } else {
             failedCount++;
             await logError(
@@ -188,9 +191,9 @@ export async function runReengagementReminderSweep(
     )
   );
 
-  const totalCost = sentCount * TEMPLATE_MESSAGE_COST_EUROS;
+  const totalCost = acceptedCount * TEMPLATE_MESSAGE_COST_EUROS;
   console.log(
-    `Re-engagement reminder sweep done: ${String(sentCount)} sent, ${String(failedCount)} failed, est. cost €${totalCost.toFixed(2)}.`
+    `Re-engagement reminder sweep done: ${String(acceptedCount)} accepted by the WH API (delivery confirmed async via status webhook), ${String(failedCount)} failed at send, est. max cost €${totalCost.toFixed(2)}.`
   );
   await umami.logAsync({
     event: "/reengagement-reminder-sweep",
@@ -198,7 +201,7 @@ export async function runReengagementReminderSweep(
     hasAccount: true,
     payload: {
       due: dueUsers.length,
-      sent: sentCount,
+      accepted: acceptedCount,
       failed: failedCount,
       cost_eur: totalCost
     }

@@ -185,7 +185,7 @@ describe("notifyPeopleUpdates — WhatsApp re-engagement", () => {
     expect(templateSpy).not.toHaveBeenCalled();
   });
 
-  it("does not flag waitingReengagement when the template fails", async () => {
+  it("keeps the waitingReengagement claim when the template fails", async () => {
     templateSpy.mockResolvedValue(false);
     const person = await makePerson();
     const user = await waUser(person._id);
@@ -197,7 +197,9 @@ describe("notifyPeopleUpdates — WhatsApp re-engagement", () => {
       new Date(Date.now() + 25 * HOUR)
     );
     const refreshed = await User.findById(user._id).lean();
-    expect(refreshed?.waitingReengagement).toBe(false);
+    // Claim is kept on failure: pending notifications are stored and the sweep
+    // treats a waiting user without lastReengagementSentAt as immediately due.
+    expect(refreshed?.waitingReengagement).toBe(true);
   });
 
   it("sends in-window when forceWHMessages is set", async () => {
@@ -227,20 +229,18 @@ describe("notifyPeopleUpdates — WhatsApp re-engagement", () => {
     );
   });
 
-  it("logs when the waitingReengagement flag is not updated", async () => {
+  it("skips the template when the claim is already taken", async () => {
     const person = await makePerson();
     await waUser(person._id);
-    const spy = vi.spyOn(User, "updateOne").mockResolvedValue(ZERO_UPDATE);
+    // Simulate another handler/run winning the atomic claim first.
+    const spy = vi.spyOn(User, "findOneAndUpdate").mockResolvedValue(null);
     await notifyPeopleUpdates(
       [record()],
       ["WhatsApp"],
       opts,
       new Date(Date.now() + 25 * HOUR)
     );
-    expect(logErrorSpy).toHaveBeenCalledWith(
-      "WhatsApp",
-      expect.stringContaining("No waitingReengagement updated")
-    );
+    expect(templateSpy).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 });

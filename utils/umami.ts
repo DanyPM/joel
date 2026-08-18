@@ -129,6 +129,7 @@ export type UmamiEvent =
   | "/reengagement-notifications-sent"
   | "/reengagement-reminder-sweep"
   | "/wh-reengagement-near-miss"
+  | "/wh-reengagement-window-expired"
   | "/trigger-pending-updates"
   | "/start"
   | "/start-from-people"

@@ -9,7 +9,7 @@ pre-commit:
   parallel: true
   jobs:
     - name: gitleaks
-      run: gitleaks protect --staged --redact --verbose
+      run: ./scripts/with-gitleaks.sh protect --staged --redact --verbose
 
 pre-push:
   parallel: true
