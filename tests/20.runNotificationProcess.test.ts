@@ -1,9 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+function emptyRange() {
+  return {
+    items: [] as unknown[],
+    requestedDays: 1,
+    failedDates: [] as string[]
+  };
+}
+
 const h = vi.hoisted(() => ({
   logErrorSpy: vi.fn(() => Promise.resolve()),
-  getRecords: vi.fn(() => Promise.resolve([] as unknown[])),
-  getMeta: vi.fn(() => Promise.resolve([] as unknown[])),
+  logErrorForAppsSpy: vi.fn(() => Promise.resolve()),
+  getRecords: vi.fn(() => Promise.resolve(emptyRange())),
+  getMeta: vi.fn(() => Promise.resolve(emptyRange())),
   refreshBlocked: vi.fn(() => Promise.resolve()),
   reengagement: vi.fn(() => Promise.resolve()),
   notifyFn: vi.fn(() => Promise.resolve()),
@@ -30,7 +39,10 @@ vi.mock("../db.ts", () => ({ mongodbConnect: vi.fn(() => Promise.resolve()) }));
 vi.mock("../utils/umami.ts", () => ({
   default: { log: vi.fn(), logAsync: vi.fn(() => Promise.resolve()) }
 }));
-vi.mock("../utils/debugLogger.ts", () => ({ logError: h.logErrorSpy }));
+vi.mock("../utils/debugLogger.ts", () => ({
+  logError: h.logErrorSpy,
+  logErrorForApps: h.logErrorForAppsSpy
+}));
 vi.mock("../utils/JORFSearch.utils.ts", () => ({
   getJORFRecordsFromDate: h.getRecords,
   getJORFMetaRecordsFromDate: h.getMeta
@@ -65,8 +77,8 @@ import type { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  h.getRecords.mockResolvedValue([]);
-  h.getMeta.mockResolvedValue([]);
+  h.getRecords.mockResolvedValue(emptyRange());
+  h.getMeta.mockResolvedValue(emptyRange());
 });
 
 describe("runNotificationProcess — missing-client guards", () => {
@@ -120,14 +132,52 @@ describe("runNotificationProcess — full run", () => {
     else delete process.env.NOTIFICATIONS_SHIFT_DAYS;
   });
 
-  it("catches and logs an error thrown mid-run", async () => {
+  it("keeps running the other source when one JORF fetch throws", async () => {
     h.getRecords.mockRejectedValueOnce(new Error("JORF down"));
     await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
-    expect(h.logErrorSpy).toHaveBeenCalledWith(
-      "Telegram",
-      "Error running notification process: ",
+    expect(h.logErrorForAppsSpy).toHaveBeenCalledWith(
+      ["Telegram"],
+      expect.stringContaining("Could not fetch JORF records"),
       expect.any(Error)
     );
+    expect(h.getMeta).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a partially fetched range and still notifies the fetched days", async () => {
+    h.getRecords.mockResolvedValueOnce({
+      items: [{ source_id: "a" }],
+      requestedDays: 3,
+      failedDates: ["2026-08-16"]
+    });
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+    expect(h.logErrorForAppsSpy).toHaveBeenCalledWith(
+      ["Telegram"],
+      expect.stringContaining("1/3 day(s)")
+    );
+    expect(h.notifyPeople).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the record handlers when no day of the range could be fetched", async () => {
+    h.getRecords.mockResolvedValueOnce({
+      items: [],
+      requestedDays: 2,
+      failedDates: ["2026-08-16", "2026-08-17"]
+    });
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+    expect(h.logErrorForAppsSpy).toHaveBeenCalledWith(
+      ["Telegram"],
+      expect.stringContaining("JORFSearch is unreachable")
+    );
+    expect(h.notifyPeople).not.toHaveBeenCalled();
+  });
+
+  it("still runs the re-engagement sweep after a JORF outage", async () => {
+    h.getRecords.mockRejectedValueOnce(new Error("JORF down"));
+    h.getMeta.mockRejectedValueOnce(new Error("JORF down"));
+    await runNotificationProcess(["WhatsApp"], {
+      whatsAppAPI: {} as unknown as WhatsAppAPI
+    });
+    expect(h.reengagement).toHaveBeenCalledTimes(1);
   });
 
   it("warns when the run exceeds the duration threshold", async () => {
@@ -136,7 +186,7 @@ describe("runNotificationProcess — full run", () => {
     // end-of-run duration check trips the "took too long" warning.
     h.getRecords.mockImplementationOnce(() => {
       vi.advanceTimersByTime(6 * 60 * 1000);
-      return Promise.resolve([]);
+      return Promise.resolve(emptyRange());
     });
     try {
       await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
@@ -168,5 +218,23 @@ describe("notifyAllFollows — fan-out", () => {
     await notifyAllFollows([], meta, ["Telegram"], {}, windowNow);
     expect(h.notifyAlert).toHaveBeenCalledTimes(1);
     expect(h.notifyPeople).not.toHaveBeenCalled();
+  });
+
+  it("runs the later handlers and reports the failure when one throws", async () => {
+    const records = [{ source_id: "a" }] as never;
+    h.notifyFn.mockRejectedValueOnce(new Error("tags exploded"));
+
+    const failed = await notifyAllFollows(
+      records,
+      [],
+      ["Telegram"],
+      {},
+      windowNow
+    );
+
+    expect(failed).toEqual(["function tags"]);
+    for (const spy of [h.notifyOrg, h.notifyPeople, h.notifyName]) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
   });
 });

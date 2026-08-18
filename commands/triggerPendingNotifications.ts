@@ -102,7 +102,7 @@ export const triggerPendingNotifications = async (
       itemsOut.values()
     ).flat();
 
-    await notifyAllFollows(
+    const failedHandlers = await notifyAllFollows(
       candidateJORFSearchItems,
       candidateJORFPublications,
       [session.messageApp],
@@ -113,6 +113,15 @@ export const triggerPendingNotifications = async (
       [session.user._id],
       true
     );
+    if (failedHandlers.length > 0) {
+      // Keep the pending queue so the user can retrigger; clearing it here would
+      // drop the notifications the failed handlers never delivered.
+      await logError(
+        session.messageApp,
+        `Pending notifications kept for user ${session.user._id.toString()}: handlers failed (${failedHandlers.join(", ")})`
+      );
+      return;
+    }
 
     await User.updateOne(
       { _id: session.user._id },

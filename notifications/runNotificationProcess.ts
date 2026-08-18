@@ -14,12 +14,55 @@ import mongoose, { Types } from "mongoose";
 
 import { ExternalMessageOptions } from "../entities/Session.ts";
 import { refreshTelegramBlockedUsers } from "../entities/TelegramSession.ts";
-import { logError } from "../utils/debugLogger.ts";
+import { logError, logErrorForApps } from "../utils/debugLogger.ts";
 import {
   getJORFMetaRecordsFromDate,
-  getJORFRecordsFromDate
+  getJORFRecordsFromDate,
+  JORFRangeResult
 } from "../utils/JORFSearch.utils.ts";
 import { formatDuration } from "../utils/date.utils.ts";
+
+/**
+ * Runs one JORFSearch range fetch, downgrading every failure mode to an empty
+ * item list so the rest of the run can proceed.
+ *
+ * A partial range still yields its items: serving the users whose follows were
+ * published on a reachable day beats serving nobody. The gap is reported so it
+ * can be replayed with NOTIFICATIONS_SHIFT_DAYS, because handlers move each
+ * follow's `lastUpdate` forward on delivery and will not revisit the missed
+ * days on their own.
+ */
+async function fetchRange<T>(
+  label: string,
+  fetch: () => Promise<JORFRangeResult<T>>,
+  targetApps: MessageApp[]
+): Promise<{ items: T[] }> {
+  let range: JORFRangeResult<T>;
+  try {
+    range = await fetch();
+  } catch (error) {
+    await logErrorForApps(
+      targetApps,
+      `Could not fetch JORF ${label}: the matching notifications are skipped for this run.`,
+      error
+    );
+    return { items: [] };
+  }
+
+  if (range.failedDates.length === 0) return { items: range.items };
+
+  const allDaysFailed = range.failedDates.length === range.requestedDays;
+  await logErrorForApps(
+    targetApps,
+    allDaysFailed
+      ? `JORFSearch is unreachable for ${label}: no day of the range could be fetched, the matching notifications are skipped for this run.`
+      : `JORFSearch returned no data for ${String(range.failedDates.length)}/${String(range.requestedDays)} day(s) of ${label} (${range.failedDates.join(", ")}). Notifications are sent for the days that were fetched; replay the missing days with NOTIFICATIONS_SHIFT_DAYS.`
+  );
+
+  // A fully failed range is indistinguishable from "nothing was published", and
+  // handlers no-op on an empty list either way.
+  return { items: allDaysFailed ? [] : range.items };
+}
 
 // Ops latency warning only: the WhatsApp send guard re-checks the 24h window
 // in real time at each send, so a slow run no longer risks 131047 errors.
@@ -116,27 +159,46 @@ export async function runNotificationProcess(
     );
     startDate.setHours(0, 0, 0, 0);
 
-    const JORFAllRecordsFromDate = await getJORFRecordsFromDate(
-      startDate,
+    // Each source is fetched independently: one being unreachable must not cost
+    // users the notifications the other one can still deliver.
+    const records = await fetchRange(
+      "records",
+      () => getJORFRecordsFromDate(startDate, targetApps),
       targetApps
     );
-    const JORFMetaRecordsFromDate = await getJORFMetaRecordsFromDate(
-      startDate,
+    const metaRecords = await fetchRange(
+      "meta publications",
+      () => getJORFMetaRecordsFromDate(startDate, targetApps),
       targetApps
     );
 
-    await notifyAllFollows(
-      JORFAllRecordsFromDate,
-      JORFMetaRecordsFromDate,
+    const failedHandlers = await notifyAllFollows(
+      records.items,
+      metaRecords.items,
       targetApps,
       messageAppsOptions,
       // `start` is the process-start snapshot; reuse it as the single window clock.
       start
     );
+    if (failedHandlers.length > 0) {
+      await logErrorForApps(
+        targetApps,
+        `Notification handlers failed and were skipped: ${failedHandlers.join(", ")}. Other handlers ran normally.`
+      );
+    }
 
     // Weekly reminder for WhatsApp users sitting on pending notifications.
+    // Independent of JORF: it must still run after a fetch or handler failure.
     if (targetApps.includes("WhatsApp")) {
-      await runReengagementReminderSweep(messageAppsOptions);
+      try {
+        await runReengagementReminderSweep(messageAppsOptions);
+      } catch (error) {
+        await logError(
+          "WhatsApp",
+          "Error running the re-engagement reminder sweep",
+          error
+        );
+      }
     }
 
     const duration_s = Math.ceil(
@@ -185,49 +247,88 @@ export async function notifyAllFollows(
   windowNow: Date,
   userIds?: Types.ObjectId[],
   forceWHMessages = false
-) {
+): Promise<string[]> {
+  const handlers: { name: string; run: () => Promise<void> }[] = [];
+
   if (JORFAllRecordsFromDate.length > 0) {
-    await notifyFunctionTagsUpdates(
-      JORFAllRecordsFromDate,
-      targetApps,
-      messageAppsOptions,
-      windowNow,
-      userIds,
-      forceWHMessages
-    );
-
-    await notifyOrganisationsUpdates(
-      JORFAllRecordsFromDate,
-      targetApps,
-      messageAppsOptions,
-      windowNow,
-      userIds,
-      forceWHMessages
-    );
-
-    await notifyPeopleUpdates(
-      JORFAllRecordsFromDate,
-      targetApps,
-      messageAppsOptions,
-      windowNow,
-      userIds,
-      forceWHMessages
-    );
-
-    await notifyNameMentionUpdates(
-      JORFAllRecordsFromDate,
-      targetApps,
-      messageAppsOptions,
-      windowNow
+    handlers.push(
+      {
+        name: "function tags",
+        run: () =>
+          notifyFunctionTagsUpdates(
+            JORFAllRecordsFromDate,
+            targetApps,
+            messageAppsOptions,
+            windowNow,
+            userIds,
+            forceWHMessages
+          )
+      },
+      {
+        name: "organisations",
+        run: () =>
+          notifyOrganisationsUpdates(
+            JORFAllRecordsFromDate,
+            targetApps,
+            messageAppsOptions,
+            windowNow,
+            userIds,
+            forceWHMessages
+          )
+      },
+      {
+        name: "people",
+        run: () =>
+          notifyPeopleUpdates(
+            JORFAllRecordsFromDate,
+            targetApps,
+            messageAppsOptions,
+            windowNow,
+            userIds,
+            forceWHMessages
+          )
+      },
+      {
+        name: "name mentions",
+        run: () =>
+          notifyNameMentionUpdates(
+            JORFAllRecordsFromDate,
+            targetApps,
+            messageAppsOptions,
+            windowNow
+          )
+      }
     );
   }
 
   if (JORFMetaRecordsFromDate.length > 0) {
-    await notifyAlertStringUpdates(
-      JORFMetaRecordsFromDate,
-      targetApps,
-      messageAppsOptions,
-      windowNow
-    );
+    handlers.push({
+      name: "alert strings",
+      run: () =>
+        notifyAlertStringUpdates(
+          JORFMetaRecordsFromDate,
+          targetApps,
+          messageAppsOptions,
+          windowNow
+        )
+    });
   }
+
+  // Handlers cover disjoint follow types, so one blowing up says nothing about
+  // the others: run each in isolation and report the failures to the caller
+  // rather than losing every later handler's users to the first throw.
+  const failedHandlers: string[] = [];
+  for (const handler of handlers) {
+    try {
+      await handler.run();
+    } catch (error) {
+      failedHandlers.push(handler.name);
+      await logErrorForApps(
+        targetApps,
+        `Error notifying ${handler.name} follows`,
+        error
+      );
+    }
+  }
+  return failedHandlers;
 }
