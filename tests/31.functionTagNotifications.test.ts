@@ -23,7 +23,8 @@ vi.mock("../utils/debugLogger.ts", () => ({ logError: logErrorSpy }));
 
 import User, { USER_SCHEMA_VERSION } from "../models/User.ts";
 
-const ZERO_UPDATE = { modifiedCount: 0 } as unknown as Awaited<
+// The follow no longer exists: $max matched nothing to raise.
+const ZERO_UPDATE = { matchedCount: 0, modifiedCount: 0 } as unknown as Awaited<
   ReturnType<typeof User.updateOne>
 >;
 import { FunctionTags } from "../entities/FunctionTags.ts";

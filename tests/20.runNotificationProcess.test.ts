@@ -71,7 +71,8 @@ vi.mock("../notifications/alertStringNotifications.ts", () => ({
 
 import {
   runNotificationProcess,
-  notifyAllFollows
+  notifyAllFollows,
+  coverageCursorFor
 } from "../notifications/runNotificationProcess.ts";
 import type { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 
@@ -155,6 +156,31 @@ describe("runNotificationProcess — full run", () => {
       expect.stringContaining("1/3 day(s)")
     );
     expect(h.notifyPeople).toHaveBeenCalledTimes(1);
+
+    // Record handlers are held back to just before the gap; the meta range was
+    // complete, so its handler keeps the full window clock.
+    const gapStart = new Date(2026, 7, 16).getTime();
+    const peopleCursor = h.notifyPeople.mock.calls[0][6] as Date;
+    expect(peopleCursor.getTime()).toBe(gapStart - 1);
+  });
+
+  it("clamps only the source that had a gap", async () => {
+    h.getRecords.mockResolvedValueOnce({
+      items: [{ source_id: "a" }],
+      requestedDays: 2,
+      failedDates: ["2026-08-17"]
+    });
+    h.getMeta.mockResolvedValueOnce({
+      items: [{ id: "m" }],
+      requestedDays: 2,
+      failedDates: []
+    });
+    await runNotificationProcess(["Telegram"], { telegramBotToken: "TOK" });
+
+    const peopleCursor = h.notifyPeople.mock.calls[0][6] as Date;
+    const alertCursor = h.notifyAlert.mock.calls[0][6] as Date;
+    expect(peopleCursor.getTime()).toBe(new Date(2026, 7, 17).getTime() - 1);
+    expect(alertCursor.getTime()).toBeGreaterThan(peopleCursor.getTime());
   });
 
   it("skips the record handlers when no day of the range could be fetched", async () => {
@@ -236,5 +262,28 @@ describe("notifyAllFollows — fan-out", () => {
     for (const spy of [h.notifyOrg, h.notifyPeople, h.notifyName]) {
       expect(spy).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe("coverageCursorFor", () => {
+  const windowNow = new Date("2026-08-18T08:00:00Z");
+
+  it("returns the window clock when every day was fetched", () => {
+    expect(coverageCursorFor(windowNow, [])).toEqual(windowNow);
+  });
+
+  it("stops just before the oldest unfetched day", () => {
+    const cursor = coverageCursorFor(windowNow, ["2026-08-17", "2026-08-15"]);
+    const gapStart = new Date(2026, 7, 15);
+
+    expect(cursor.getTime()).toBe(gapStart.getTime() - 1);
+    // A record dated on the gap day stays above the cursor, so a later run
+    // still picks it up.
+    expect(gapStart.getTime()).toBeGreaterThan(cursor.getTime());
+  });
+
+  it("never returns a cursor ahead of the window clock", () => {
+    const cursor = coverageCursorFor(windowNow, ["2027-01-01"]);
+    expect(cursor).toEqual(windowNow);
   });
 });

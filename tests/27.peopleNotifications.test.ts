@@ -23,7 +23,8 @@ vi.mock("../utils/debugLogger.ts", () => ({ logError: logErrorSpy }));
 
 import User, { USER_SCHEMA_VERSION } from "../models/User.ts";
 
-const ZERO_UPDATE = { modifiedCount: 0 } as unknown as Awaited<
+// The follow no longer exists: $max matched nothing to raise.
+const ZERO_UPDATE = { matchedCount: 0, modifiedCount: 0 } as unknown as Awaited<
   ReturnType<typeof User.updateOne>
 >;
 import People from "../models/People.ts";
@@ -310,5 +311,81 @@ describe("sendPeopleUpdate", () => {
     sendMessageSpy.mockResolvedValue(false);
     const map = new Map([["pid", [record()]]]);
     expect(await sendPeopleUpdate(userInfo, map, opts)).toBe(false);
+  });
+});
+
+describe("notifyPeopleUpdates — coverage cursor", () => {
+  it("advances lastUpdate to windowNow when the range is complete", async () => {
+    const person = await makePerson();
+    const user = await makeUser(person._id);
+    const windowNow = new Date("2026-06-21T08:00:00Z");
+
+    await notifyPeopleUpdates([record()], ["Telegram"], opts, windowNow);
+
+    const refreshed = await User.findById(user._id);
+    expect(refreshed?.followedPeople[0].lastUpdate).toEqual(windowNow);
+  });
+
+  it("stops lastUpdate short of an unfetched day so its records stay eligible", async () => {
+    const person = await makePerson();
+    const user = await makeUser(person._id);
+    const windowNow = new Date("2026-06-21T08:00:00Z");
+    // The run covered 2026-06-20 but never fetched 2026-06-21.
+    const cursor = new Date(new Date(2026, 5, 21).getTime() - 1);
+
+    await notifyPeopleUpdates(
+      [record()],
+      ["Telegram"],
+      opts,
+      windowNow,
+      undefined,
+      false,
+      cursor
+    );
+
+    const refreshed = await User.findById(user._id);
+    const stored = refreshed?.followedPeople[0].lastUpdate;
+    expect(stored).toEqual(cursor);
+    // A record published on the unfetched day still sorts above the cursor.
+    expect(new Date(2026, 5, 21).getTime()).toBeGreaterThan(
+      stored?.getTime() ?? 0
+    );
+  });
+
+  it("stays quiet when the follow is already at or past the cursor", async () => {
+    const person = await makePerson();
+    await makeUser(person._id);
+    // Matched the follow, left it untouched because $max found nothing newer.
+    const spy = vi
+      .spyOn(User, "updateOne")
+      .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 0 } as Awaited<
+        ReturnType<typeof User.updateOne>
+      >);
+
+    await notifyPeopleUpdates([record()], ["Telegram"], opts, new Date());
+
+    expect(logErrorSpy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("never rewinds a follow that is already ahead of the cursor", async () => {
+    const person = await makePerson();
+    const ahead = new Date("2026-06-25T00:00:00Z");
+    const user = await makeUser(person._id, {
+      followedPeople: [{ peopleId: person._id, lastUpdate: ahead }]
+    });
+
+    await notifyPeopleUpdates(
+      [record({ source_date: "2026-06-26" })],
+      ["Telegram"],
+      opts,
+      new Date("2026-06-27T08:00:00Z"),
+      undefined,
+      false,
+      new Date("2026-06-20T00:00:00Z")
+    );
+
+    const refreshed = await User.findById(user._id);
+    expect(refreshed?.followedPeople[0].lastUpdate).toEqual(ahead);
   });
 });

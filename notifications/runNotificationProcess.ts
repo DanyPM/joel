@@ -20,7 +20,7 @@ import {
   getJORFRecordsFromDate,
   JORFRangeResult
 } from "../utils/JORFSearch.utils.ts";
-import { formatDuration } from "../utils/date.utils.ts";
+import { formatDuration, JORFtoDate } from "../utils/date.utils.ts";
 
 /**
  * Runs one JORFSearch range fetch, downgrading every failure mode to an empty
@@ -32,11 +32,34 @@ import { formatDuration } from "../utils/date.utils.ts";
  * follow's `lastUpdate` forward on delivery and will not revisit the missed
  * days on their own.
  */
+/**
+ * Newest instant a range is known to cover completely.
+ *
+ * Coverage runs forward from a follow's stored `lastUpdate`, so it ends at the
+ * first day the range failed to fetch: everything from that day on is unknown,
+ * whether or not later days succeeded. Returns the last millisecond before that
+ * day starts, which keeps records dated that day above the cursor and therefore
+ * eligible on a later run. `JORFtoDate` and the handlers' own comparisons both
+ * place a YMD date at local midnight, so the two agree on the boundary.
+ */
+export function coverageCursorFor(
+  windowNow: Date,
+  failedDates: string[]
+): Date {
+  if (failedDates.length === 0) return windowNow;
+  // YMD sorts lexicographically in date order.
+  const oldestGap = failedDates.reduce((a, b) => (a < b ? a : b));
+  return new Date(
+    Math.min(windowNow.getTime(), JORFtoDate(oldestGap).getTime() - 1)
+  );
+}
+
 async function fetchRange<T>(
   label: string,
   fetch: () => Promise<JORFRangeResult<T>>,
-  targetApps: MessageApp[]
-): Promise<{ items: T[] }> {
+  targetApps: MessageApp[],
+  windowNow: Date
+): Promise<{ items: T[]; coverageCursor: Date }> {
   let range: JORFRangeResult<T>;
   try {
     range = await fetch();
@@ -46,22 +69,27 @@ async function fetchRange<T>(
       `Could not fetch JORF ${label}: the matching notifications are skipped for this run.`,
       error
     );
-    return { items: [] };
+    return { items: [], coverageCursor: windowNow };
   }
 
-  if (range.failedDates.length === 0) return { items: range.items };
+  if (range.failedDates.length === 0) {
+    return { items: range.items, coverageCursor: windowNow };
+  }
 
   const allDaysFailed = range.failedDates.length === range.requestedDays;
   await logErrorForApps(
     targetApps,
     allDaysFailed
       ? `JORFSearch is unreachable for ${label}: no day of the range could be fetched, the matching notifications are skipped for this run.`
-      : `JORFSearch returned no data for ${String(range.failedDates.length)}/${String(range.requestedDays)} day(s) of ${label} (${range.failedDates.join(", ")}). Notifications are sent for the days that were fetched; replay the missing days with NOTIFICATIONS_SHIFT_DAYS.`
+      : `JORFSearch returned no data for ${String(range.failedDates.length)}/${String(range.requestedDays)} day(s) of ${label} (${range.failedDates.join(", ")}). Notifications are sent for the days that were fetched, and follows are not advanced past ${range.failedDates.reduce((a, b) => (a < b ? a : b))} so the gap is picked up on a later run.`
   );
 
   // A fully failed range is indistinguishable from "nothing was published", and
   // handlers no-op on an empty list either way.
-  return { items: allDaysFailed ? [] : range.items };
+  return {
+    items: allDaysFailed ? [] : range.items,
+    coverageCursor: coverageCursorFor(windowNow, range.failedDates)
+  };
 }
 
 // Ops latency warning only: the WhatsApp send guard re-checks the 24h window
@@ -164,12 +192,14 @@ export async function runNotificationProcess(
     const records = await fetchRange(
       "records",
       () => getJORFRecordsFromDate(startDate, targetApps),
-      targetApps
+      targetApps,
+      start
     );
     const metaRecords = await fetchRange(
       "meta publications",
       () => getJORFMetaRecordsFromDate(startDate, targetApps),
-      targetApps
+      targetApps,
+      start
     );
 
     const failedHandlers = await notifyAllFollows(
@@ -178,7 +208,13 @@ export async function runNotificationProcess(
       targetApps,
       messageAppsOptions,
       // `start` is the process-start snapshot; reuse it as the single window clock.
-      start
+      start,
+      undefined,
+      false,
+      {
+        records: records.coverageCursor,
+        meta: metaRecords.coverageCursor
+      }
     );
     if (failedHandlers.length > 0) {
       await logErrorForApps(
@@ -246,7 +282,14 @@ export async function notifyAllFollows(
   // handler 5 just because the run is slow.
   windowNow: Date,
   userIds?: Types.ObjectId[],
-  forceWHMessages = false
+  forceWHMessages = false,
+  // How far each source is known to be complete. The default suits callers
+  // whose records come from explicit lookups rather than a day range, where
+  // coverage is total by construction.
+  coverageCursors: { records: Date; meta: Date } = {
+    records: windowNow,
+    meta: windowNow
+  }
 ): Promise<string[]> {
   const handlers: { name: string; run: () => Promise<void> }[] = [];
 
@@ -261,7 +304,8 @@ export async function notifyAllFollows(
             messageAppsOptions,
             windowNow,
             userIds,
-            forceWHMessages
+            forceWHMessages,
+            coverageCursors.records
           )
       },
       {
@@ -273,7 +317,8 @@ export async function notifyAllFollows(
             messageAppsOptions,
             windowNow,
             userIds,
-            forceWHMessages
+            forceWHMessages,
+            coverageCursors.records
           )
       },
       {
@@ -285,7 +330,8 @@ export async function notifyAllFollows(
             messageAppsOptions,
             windowNow,
             userIds,
-            forceWHMessages
+            forceWHMessages,
+            coverageCursors.records
           )
       },
       {
@@ -295,7 +341,12 @@ export async function notifyAllFollows(
             JORFAllRecordsFromDate,
             targetApps,
             messageAppsOptions,
-            windowNow
+            windowNow,
+            // `userIds` / `forceWHMessages` are deliberately not forwarded here:
+            // this handler has always run unscoped and unforced.
+            undefined,
+            false,
+            coverageCursors.records
           )
       }
     );
@@ -309,7 +360,11 @@ export async function notifyAllFollows(
           JORFMetaRecordsFromDate,
           targetApps,
           messageAppsOptions,
-          windowNow
+          windowNow,
+          // Unscoped and unforced, as this handler has always been called.
+          undefined,
+          false,
+          coverageCursors.meta
         )
     });
   }
