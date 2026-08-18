@@ -73,7 +73,14 @@ export async function notifyOrganisationsUpdates(
   // the 24h-window decision can't drift as the (slow) run progresses.
   windowNow: Date,
   userIds?: Types.ObjectId[],
-  forceWHMessages = false
+  forceWHMessages = false,
+  // Newest instant this run is known to have complete JORFSearch coverage for.
+  // Equal to `windowNow` on a healthy run; clamped to just before the oldest
+  // unfetched day when the range had a gap, so a follow's `lastUpdate` never
+  // steps over a day whose records were never seen. Kept apart from
+  // `windowNow`: rewinding the 24h-window clock would let WhatsApp sends slip
+  // outside their re-engagement window.
+  coverageCursor: Date = windowNow
 ) {
   const updatedOrgsWikidataIdSet = new Set<WikidataId>(
     allUpdatedRecords
@@ -294,7 +301,7 @@ export async function notifyOrganisationsUpdates(
               $in: updatedWikidataIds
             }
           },
-          { $set: { "followedOrganisations.$[elem].lastUpdate": now } },
+          { $max: { "followedOrganisations.$[elem].lastUpdate": coverageCursor } },
           {
             arrayFilters: [
               {
@@ -305,7 +312,7 @@ export async function notifyOrganisationsUpdates(
             ]
           }
         );
-        if (res.modifiedCount === 0) {
+        if (res.matchedCount === 0) {
           await logError(
             task.userInfo.messageApp,
             `No lastUpdate updated for user ${task.userId.toString()} after storing pending organisation update notifications (WH reengagement)`
@@ -332,7 +339,9 @@ export async function notifyOrganisationsUpdates(
             $in: [...task.updatedRecordsMap.keys()]
           }
         },
-        { $set: { "followedOrganisations.$[elem].lastUpdate": now } },
+        {
+          $max: { "followedOrganisations.$[elem].lastUpdate": coverageCursor }
+        },
         {
           arrayFilters: [
             {
@@ -343,7 +352,7 @@ export async function notifyOrganisationsUpdates(
           ]
         }
       );
-      if (res.modifiedCount === 0) {
+      if (res.matchedCount === 0) {
         await logError(
           task.userInfo.messageApp,
           `No lastUpdate updated for user ${task.userId.toString()} after sending organisation update notifications`

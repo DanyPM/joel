@@ -20,7 +20,7 @@ import {
 } from "../entities/JORFSearchResponseMeta.ts";
 import { FunctionTags } from "../entities/FunctionTags.ts";
 import { dateToString, JORFtoDate } from "./date.utils.ts";
-import { logError } from "./debugLogger.ts";
+import { logError, logErrorForApps } from "./debugLogger.ts";
 import { IPublication, Publication } from "../models/Publication.ts";
 
 // Per Wikimedia policy, provide a descriptive agent with contact info.
@@ -197,56 +197,99 @@ async function callJORFSearchDay(
         return await callJORFSearchDay(day, messageApps, retryNumber + 1);
       } else {
         logJORFSearchError("date");
-        for (const messageApp of messageApps)
-          await logError(
-            messageApp,
-            `JORFSearch request for date aborted after ${String(RETRY_MAX)} tries`,
-            error
-          );
+        await logErrorForApps(
+          messageApps,
+          `JORFSearch request for date aborted after ${String(RETRY_MAX)} tries`,
+          error
+        );
       }
     } else {
-      for (const messageApp of messageApps)
-        await logError(messageApp, "Error in callJORFSearchDay", error);
+      await logErrorForApps(messageApps, "Error in callJORFSearchDay", error);
     }
   }
   return null;
 }
 
-export async function getJORFRecordsFromDate(
-  startDate: Date,
-  messageApps: MessageApp[]
-): Promise<JORFSearchItem[]> {
+/**
+ * A day range fetched from JORFSearch. `failedDates` lists the days (YMD) whose
+ * fetch never succeeded, so callers can tell "nothing was published" apart from
+ * "we could not find out".
+ */
+export interface JORFRangeResult<T> {
+  items: T[];
+  requestedDays: number;
+  failedDates: string[];
+}
+
+/**
+ * Builds the descending list of days from `startDate` up to today, without
+ * mutating the caller's `startDate`.
+ */
+function buildDayRange(startDate: Date): Date[] {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  startDate.setHours(0, 0, 0, 0);
+  const from = new Date(startDate);
+  from.setHours(0, 0, 0, 0);
 
   const dayCount =
-    Math.floor((today.getTime() - startDate.getTime()) / 86_400_000) + 1;
-  const days: Date[] = Array.from({ length: dayCount }, (_, i) => {
+    Math.floor((today.getTime() - from.getTime()) / 86_400_000) + 1;
+  return Array.from({ length: dayCount }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
     return d;
   });
+}
+
+/**
+ * Walks `days` in chunks of {@link JORFSEARCH_CALLS_CONCURRENCY}, recording the
+ * days that came back empty-handed.
+ *
+ * Once a whole chunk fails, JORFSearch is treated as down and the remaining days
+ * are marked failed without being requested: each day already burns
+ * `RETRY_MAX + 1` attempts, so a multi-day backfill against a dead host would
+ * otherwise spend minutes hammering it before reaching the notification stage.
+ */
+async function fetchDayRange<T>(
+  days: Date[],
+  fetchDay: (day: Date) => Promise<T | null>
+): Promise<{ results: T[]; failedDates: string[] }> {
+  const results: T[] = [];
+  const failedDates: string[] = [];
 
   const limit = JORFSEARCH_CALLS_CONCURRENCY;
-  const chunks: Date[][] = [];
-  for (let i = 0; i < days.length; i += limit)
-    chunks.push(days.slice(i, i + limit));
+  for (let i = 0; i < days.length; i += limit) {
+    const sub = days.slice(i, i + limit);
+    const subResults = await Promise.all(sub.map(fetchDay));
 
-  const resultTab: (JORFSearchDayResult | null)[] = [];
-  for (const sub of chunks) {
-    resultTab.push(
-      ...(await Promise.all(
-        sub.map((day: Date) => callJORFSearchDay(day, messageApps))
-      ))
-    );
+    subResults.forEach((result, j) => {
+      if (result == null) failedDates.push(dateToString(sub[j], "YMD"));
+      else results.push(result);
+    });
+
+    if (subResults.every((result) => result == null)) {
+      for (const day of days.slice(i + limit)) {
+        failedDates.push(dateToString(day, "YMD"));
+      }
+      break;
+    }
   }
 
+  return { results, failedDates };
+}
+
+export async function getJORFRecordsFromDate(
+  startDate: Date,
+  messageApps: MessageApp[]
+): Promise<JORFRangeResult<JORFSearchItem>> {
+  const days = buildDayRange(startDate);
+
+  const { results, failedDates } = await fetchDayRange(days, (day) =>
+    callJORFSearchDay(day, messageApps)
+  );
+
   const allResults: JORFSearchDayResult = {
-    items: resultTab.flatMap((r) => r?.items ?? []),
-    stats: mergeJORFSearchItemCleaningStats(
-      resultTab.flatMap((r) => r?.stats ?? [])
-    )
+    items: results.flatMap((r) => r.items),
+    stats: mergeJORFSearchItemCleaningStats(results.flatMap((r) => r.stats))
   };
 
   // Log aggregated statistics once per app
@@ -256,15 +299,21 @@ export async function getJORFRecordsFromDate(
       messageApp,
       payload: {
         ...allResults.stats,
-        day_nb: dayCount
+        day_nb: days.length,
+        failed_day_nb: failedDates.length
       }
     });
   }
 
-  return allResults.items.sort(
-    (a, b) =>
-      JORFtoDate(a.source_date).getTime() - JORFtoDate(b.source_date).getTime()
-  );
+  return {
+    items: allResults.items.sort(
+      (a, b) =>
+        JORFtoDate(a.source_date).getTime() -
+        JORFtoDate(b.source_date).getTime()
+    ),
+    requestedDays: days.length,
+    failedDates
+  };
 }
 
 export interface JORFSearchMetaDayResult {
@@ -331,15 +380,17 @@ export async function callJORFSearchMetaDay(
         );
       }
       logJORFSearchError("meta");
-      for (const messageApp of messageApps)
-        await logError(
-          messageApp,
-          `JORFSearch request for meta aborted after ${String(RETRY_MAX)} tries`,
-          error
-        );
+      await logErrorForApps(
+        messageApps,
+        `JORFSearch request for meta aborted after ${String(RETRY_MAX)} tries`,
+        error
+      );
     } else {
-      for (const messageApp of messageApps)
-        await logError(messageApp, "Error in callJORFSearchMetaDay", error);
+      await logErrorForApps(
+        messageApps,
+        "Error in callJORFSearchMetaDay",
+        error
+      );
     }
   }
   return null;
@@ -348,34 +399,13 @@ export async function callJORFSearchMetaDay(
 export async function getJORFMetaRecordsFromDate(
   startDate: Date,
   messageApps: MessageApp[]
-): Promise<JORFSearchPublication[]> {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  startDate.setHours(0, 0, 0, 0);
+): Promise<JORFRangeResult<JORFSearchPublication>> {
+  const days = buildDayRange(startDate);
 
-  const dayCount =
-    Math.floor((today.getTime() - startDate.getTime()) / 86_400_000) + 1;
-  const days: Date[] = Array.from({ length: dayCount }, (_, i) => {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    return d;
-  });
-
-  const limit = JORFSEARCH_CALLS_CONCURRENCY;
-  const chunks: Date[][] = [];
-  for (let i = 0; i < days.length; i += limit)
-    chunks.push(days.slice(i, i + limit));
-
-  const results: (JORFSearchMetaDayResult | null)[] = [];
-  for (const sub of chunks) {
-    results.push(
-      ...(await Promise.all(
-        sub.map((day: Date) =>
-          callJORFSearchMetaDay(day, messageApps, 0, false)
-        ) // saveTodB is false to save to dB in batch
-      ))
-    );
-  }
+  const { results, failedDates } = await fetchDayRange(
+    days,
+    (day) => callJORFSearchMetaDay(day, messageApps, 0, false) // saved to dB in batch below
+  );
 
   const allItems: JORFSearchPublication[] = [];
   let totalRawItems = 0;
@@ -383,7 +413,6 @@ export async function getJORFMetaRecordsFromDate(
   let totalDroppedItems = 0;
 
   for (const result of results) {
-    if (result == null) throw new Error("JORFSearch returned a null value");
     allItems.push(...result.items);
     totalRawItems += result.stats.raw_item_nb;
     totalCleanItems += result.stats.clean_item_nb;
@@ -399,7 +428,8 @@ export async function getJORFMetaRecordsFromDate(
         raw_item_nb: totalRawItems,
         clean_item_nb: totalCleanItems,
         dropped_item_nb: totalDroppedItems,
-        day_nb: dayCount
+        day_nb: days.length,
+        failed_day_nb: failedDates.length
       }
     });
   }
@@ -410,7 +440,7 @@ export async function getJORFMetaRecordsFromDate(
 
   await saveMetaPublications(allItems, messageApps);
 
-  return allItems;
+  return { items: allItems, requestedDays: days.length, failedDates };
 }
 
 export async function callJORFSearchTag(

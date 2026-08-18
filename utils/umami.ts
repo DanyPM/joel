@@ -60,15 +60,22 @@ const axiosClient = axios.create({
 // Shared limiter to cap concurrent send attempts across all log calls.
 const limit = pLimit(5);
 
-const logInternal = async (args: UmamiLogArgs) => {
-  if (process.env.NODE_ENV === "test") return;
+// Umami is the only record that a scheduled run happened at all, so a dropped
+// event is indistinguishable from a run that never started. Retry before
+// giving up.
+const SEND_MAX_ATTEMPTS = 3;
+const SEND_RETRY_DELAY_MS = 500;
+
+// Resolves to false when the event did not reach Umami.
+const logInternal = async (args: UmamiLogArgs): Promise<boolean> => {
+  if (process.env.NODE_ENV === "test") return true;
   if (process.env.NODE_ENV === "development") {
     console.log(
       `Umami event ${args.messageApp ? "(" + args.messageApp + ")" : ""}: ${args.event}`
     );
     if (args.notificationData != null || args.payload != null)
       console.log({ ...args.notificationData, ...args.payload });
-    return;
+    return true;
   } else {
     if (args.messageApp === "debug") {
       throw new Error(
@@ -85,19 +92,29 @@ const logInternal = async (args: UmamiLogArgs) => {
         "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
     }
   };
-  await limit(async () => {
-    try {
-      await axiosClient.post(endpoint, payload, options);
-    } catch (error) {
-      if (isAxiosError(error)) {
-        const axiosErr = error as AxiosError;
-        console.error(
-          `Axios error on umami.log "${args.event}" : ${axiosErr.code ? " " + axiosErr.code : ""} ${axiosErr.message}`
-        );
-      } else {
-        console.log(error);
+  return await limit(async () => {
+    for (let attempt = 1; attempt <= SEND_MAX_ATTEMPTS; attempt++) {
+      try {
+        await axiosClient.post(endpoint, payload, options);
+        return true;
+      } catch (error) {
+        if (attempt < SEND_MAX_ATTEMPTS) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, SEND_RETRY_DELAY_MS * attempt)
+          );
+          continue;
+        }
+        if (isAxiosError(error)) {
+          const axiosErr = error as AxiosError;
+          console.error(
+            `Axios error on umami.log "${args.event}" : ${axiosErr.code ? " " + axiosErr.code : ""} ${axiosErr.message}`
+          );
+        } else {
+          console.log(error);
+        }
       }
     }
+    return false;
   });
 };
 
@@ -114,9 +131,17 @@ export const logAsync: UmamiLogger = async (
   await logInternal(args);
 };
 
+/**
+ * Like {@link logAsync}, but reports whether the event actually reached Umami.
+ * Use it for events whose absence is itself the signal being measured.
+ */
+export const logAsyncVerified = async (args: UmamiLogArgs): Promise<boolean> =>
+  await logInternal(args);
+
 export default {
   log,
-  logAsync
+  logAsync,
+  logAsyncVerified
 };
 
 export type UmamiEvent =

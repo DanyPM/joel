@@ -4,7 +4,7 @@ import mongoose from "mongoose";
 const { logErrorSpy, callRefSpy, notifyAllSpy } = vi.hoisted(() => ({
   logErrorSpy: vi.fn(() => Promise.resolve()),
   callRefSpy: vi.fn(),
-  notifyAllSpy: vi.fn(() => Promise.resolve())
+  notifyAllSpy: vi.fn(() => Promise.resolve([] as string[]))
 }));
 
 vi.mock("../utils/debugLogger.ts", () => ({ logError: logErrorSpy }));
@@ -126,6 +126,13 @@ describe("triggerPendingNotifications", () => {
 
     expect(callRefSpy).toHaveBeenCalledWith("R1", "Telegram");
     expect(notifyAllSpy).toHaveBeenCalled();
+    // Scoped to the triggering user and forced past the WH window: this is an
+    // on-demand delivery, not a broadcast.
+    const notifyArgs = notifyAllSpy.mock.calls[0] as unknown[];
+    expect((notifyArgs[5] as { toString(): string }[])[0].toString()).toBe(
+      user._id.toString()
+    );
+    expect(notifyArgs[6]).toBe(true);
     const refreshed = await User.findById(user._id);
     expect(refreshed?.pendingNotifications.length).toBe(0);
     expect(refreshed?.waitingReengagement).toBe(false);
@@ -164,6 +171,26 @@ describe("triggerPendingNotifications", () => {
     await triggerPendingNotifications(
       makeSession(await User.findById(user._id))
     );
+    expect(logErrorSpy).toHaveBeenCalled();
+  });
+
+  it("keeps the pending pile when a handler is reported as failed", async () => {
+    const user = await userWithPending([
+      {
+        notificationType: "organisation",
+        source_ids: ["R1"],
+        insertDate: new Date(),
+        items_nb: 1
+      }
+    ]);
+    notifyAllSpy.mockResolvedValueOnce(["organisations"]);
+
+    await triggerPendingNotifications(
+      makeSession(await User.findById(user._id))
+    );
+
+    const refreshed = await User.findById(user._id);
+    expect(refreshed?.pendingNotifications.length).toBe(1);
     expect(logErrorSpy).toHaveBeenCalled();
   });
 });

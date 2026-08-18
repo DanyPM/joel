@@ -4,6 +4,8 @@ import express from "express";
 
 import { WhatsAppAPI } from "whatsapp-api-js/middleware/express";
 import { PostData, ServerMessage } from "whatsapp-api-js/types";
+import type { OnMessageArgs } from "whatsapp-api-js/emitters";
+import { WhatsAppAPIError } from "whatsapp-api-js/errors";
 
 import { mongodbConnect, mongodbDisconnect } from "../db.ts";
 import umami from "../utils/umami.ts";
@@ -13,10 +15,15 @@ import {
   WhatsAppSession
 } from "../entities/WhatsAppSession.ts";
 import { startDailyNotificationJobs } from "../notifications/notificationScheduler.ts";
-import { logError, sendTelegramDebugMessage } from "../utils/debugLogger.ts";
+import {
+  logError,
+  logWarning,
+  sendTelegramDebugMessage
+} from "../utils/debugLogger.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 import { getCachedStats } from "../commands/stats.ts";
 import { createTtlDedup } from "../utils/webhookDedup.ts";
+import { textFromMessage } from "../utils/whatsAppMessageText.ts";
 
 const MAX_AGE_SEC = 5 * 60;
 const DUPLICATE_MESSAGE_TTL_MS = MAX_AGE_SEC * 1000;
@@ -212,7 +219,13 @@ await (async function () {
             return;
           }
         }
-        res.sendStatus(500);
+        // Meta redelivers on any non-2xx. Reply with the status the library
+        // attached to the error (401 on a bad signature, 400 on a malformed
+        // payload) so a permanently unprocessable delivery is not retried on a
+        // schedule; anything unclassified keeps the retryable 500.
+        res.sendStatus(
+          error instanceof WhatsAppAPIError ? error.httpStatus : 500
+        );
         await logError("WhatsApp", "Webhook processing failed", error);
       }
     });
@@ -288,9 +301,30 @@ await (async function () {
       }
     });
 
-    whatsAppAPI.on.message = async ({ phoneID, from, message }) => {
+    whatsAppAPI.on.message = async (args) => {
+      try {
+        await handleInboundMessage(whatsAppAPI, args);
+      } catch (error) {
+        // Never let a handler fault escape into `whatsAppAPI.post()`: it would
+        // turn the webhook reply into a 500 and Meta would redeliver the same
+        // payload on a schedule, replaying the same fault.
+        await logError("WhatsApp", "Error handling inbound message", error);
+      }
+    };
+
+    const handleInboundMessage = async (
+      api: WhatsAppAPI,
+      { phoneID, from, message }: OnMessageArgs
+    ): Promise<void> => {
       // Filter out events from the bot itself
       if (from === WHATSAPP_PHONE_ID) return;
+
+      // A "messages" change carrying an empty `messages` array reaches the
+      // emitter with no message at all, despite the non-optional type.
+      if ((message as ServerMessage | undefined) == null) {
+        await logWarning("WhatsApp", "Received message event with no message");
+        return;
+      }
 
       // Filter out non-text messages
       const msgText = textFromMessage(message);
@@ -325,12 +359,12 @@ await (async function () {
 
       try {
         // Mark as read in parallel (don't await)
-        void whatsAppAPI.markAsRead(phoneID, message.id);
+        void api.markAsRead(phoneID, message.id);
 
         const messageSentDate = new Date(messageTimeStampSeconds * 1000);
 
         const WHSession = new WhatsAppSession(
-          whatsAppAPI,
+          api,
           phoneID,
           from,
           "fr",
@@ -342,7 +376,6 @@ await (async function () {
       } catch (error) {
         await logError("WhatsApp", "Error processing inbound message", error);
       }
-      return;
     };
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -383,45 +416,6 @@ await (async function () {
     await logError("WhatsApp", "Failed to start app", error);
   }
 })();
-
-/**
- * Pick a printable fragment from any WhatsApp inbound message.
- * Returns `null` when there is nothing reasonably textual.
- */
-export function textFromMessage(msg: ServerMessage): string | null {
-  switch (msg.type) {
-    //  Plain text
-    case "text":
-      return msg.text.body;
-
-    // Quick-reply buttons
-    case "button":
-      return msg.button.text;
-
-    //  Interactive replies (List, Reply-button, Flow)  */
-    case "interactive":
-      switch (msg.interactive.type) {
-        case "list_reply":
-          return msg.interactive.list_reply.title;
-        case "button_reply":
-          return msg.interactive.button_reply.title;
-        /*
-      case "nfm_reply": // Flow submission
-        return (
-          msg.interactive.nfm_reply.body ??
-          msg.interactive.nfm_reply.response_json ??
-          null);
-        */
-      }
-      return null;
-
-    /*  Catch-all for anything the API marks
-         as unsupported or future types  */
-    default:
-      void logError("WhatsApp", `Unsupported message type: ${msg.type}`);
-      return null;
-  }
-}
 
 // Define an interface for the potential message-containing object
 interface WhatsAppValueObject {

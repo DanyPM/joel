@@ -36,7 +36,14 @@ export async function notifyAlertStringUpdates(
   // the 24h-window decision can't drift as the (slow) run progresses.
   windowNow: Date,
   userIds?: Types.ObjectId[],
-  forceWHMessages = false
+  forceWHMessages = false,
+  // Newest instant this run is known to have complete JORFSearch coverage for.
+  // Equal to `windowNow` on a healthy run; clamped to just before the oldest
+  // unfetched day when the range had a gap, so a follow's `lastUpdate` never
+  // steps over a day whose records were never seen. Kept apart from
+  // `windowNow`: rewinding the 24h-window clock would let WhatsApp sends slip
+  // outside their re-engagement window.
+  coverageCursor: Date = windowNow
 ) {
   if (metaRecords.length === 0) return;
 
@@ -213,8 +220,8 @@ export async function notifyAlertStringUpdates(
         const res = await User.updateOne(
           { _id: task.userId },
           {
-            $set: {
-              "followedMeta.$[elem].lastUpdate": now
+            $max: {
+              "followedMeta.$[elem].lastUpdate": coverageCursor
             }
           },
           {
@@ -225,7 +232,7 @@ export async function notifyAlertStringUpdates(
             ]
           }
         );
-        if (res.modifiedCount === 0) {
+        if (res.matchedCount === 0) {
           await logError(
             task.userInfo.messageApp,
             `No lastUpdate updated for user ${task.userId.toString()} after storing pending text update notifications (WH reengagement)`
@@ -245,10 +252,15 @@ export async function notifyAlertStringUpdates(
       if (!messageSent) return;
 
       const res = await User.updateOne(
-        { _id: task.userId },
         {
-          $set: {
-            "followedMeta.$[elem].lastUpdate": now
+          _id: task.userId,
+          "followedMeta.alertString": {
+            $in: [...task.updatedRecordsMap.keys()]
+          }
+        },
+        {
+          $max: {
+            "followedMeta.$[elem].lastUpdate": coverageCursor
           }
         },
         {
@@ -259,7 +271,7 @@ export async function notifyAlertStringUpdates(
           ]
         }
       );
-      if (res.modifiedCount === 0) {
+      if (res.matchedCount === 0) {
         await logError(
           task.userInfo.messageApp,
           `No lastUpdate updated for user ${task.userId.toString()} after sending text update notifications`

@@ -35,7 +35,7 @@ export async function updateFollowedNamesToFollowedPeople(
   updatedRecordsMapKeys: string[],
   peopleIdByFollowedNameMap: Map<string, Types.ObjectId>,
   userFollowingNames: IUser[],
-  now: Date,
+  coverageCursor: Date,
   errorLogSuffix: string,
   messageApp: MessageApp,
   source: "direct" | "pending"
@@ -74,7 +74,7 @@ export async function updateFollowedNamesToFollowedPeople(
         followedPeople: {
           $each: newFollowsIdUnique.map((id) => ({
             peopleId: id,
-            lastUpdate: now
+            lastUpdate: coverageCursor
           }))
         }
       }
@@ -96,7 +96,14 @@ export async function notifyNameMentionUpdates(
   // the 24h-window decision can't drift as the (slow) run progresses.
   windowNow: Date,
   userIds?: Types.ObjectId[],
-  forceWHMessages = false
+  forceWHMessages = false,
+  // Newest instant this run is known to have complete JORFSearch coverage for.
+  // Equal to `windowNow` on a healthy run; clamped to just before the oldest
+  // unfetched day when the range had a gap, so a follow's `lastUpdate` never
+  // steps over a day whose records were never seen. Kept apart from
+  // `windowNow`: rewinding the 24h-window clock would let WhatsApp sends slip
+  // outside their re-engagement window.
+  coverageCursor: Date = windowNow
 ) {
   let dbFilters: QueryFilter<IUser> = {
     "followedNames.0": { $exists: true },
@@ -290,7 +297,7 @@ export async function notifyNameMentionUpdates(
         [...task.updatedRecordsMap.keys()],
         peopleIdByFollowedNameMap,
         userFollowingNames,
-        now,
+        coverageCursor,
         "after storing pending name update notifications",
         task.userInfo.messageApp,
         "pending"
@@ -313,7 +320,7 @@ export async function notifyNameMentionUpdates(
         [...task.updatedRecordsMap.keys()],
         peopleIdByFollowedNameMap,
         userFollowingNames,
-        now,
+        coverageCursor,
         "after sending name update notifications",
         task.userInfo.messageApp,
         "direct"
