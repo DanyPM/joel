@@ -12,6 +12,32 @@ type LogLevel = "warning" | "error";
 const DEBUG_CHAT_ID = process.env.DEBUG_CHAT_ID;
 const TELEGRAM_DEBUG_BOT_TOKEN = process.env.TELEGRAM_DEBUG_BOT_TOKEN;
 
+// Runtime and tooling variables whose values are public words that occur in
+// ordinary log text: substituting them turns "started in production mode" into
+// "started in <NODE_ENV> mode". Everything not listed here is still redacted,
+// so an unrecognized variable is treated as a secret.
+const NON_SECRET_ENV_PATTERNS = [
+  /^NODE_ENV$/,
+  /^NODE_OPTIONS$/,
+  /^NODE_VERSION$/,
+  /^MATRIX_BOT_TYPE$/,
+  /^MATRIX_ENCRYPTION_ENABLED$/,
+  /^TZ$/,
+  /^LANG$/,
+  /^PWD$/,
+  /^HOME$/,
+  /^PATH$/,
+  /^SHELL$/,
+  /^TERM$/,
+  /^HOSTNAME$/,
+  /^npm_/,
+  /^VITEST/,
+  /^CI$/
+];
+
+const isNonSecretEnvKey = (key: string): boolean =>
+  NON_SECRET_ENV_PATTERNS.some((pattern) => pattern.test(key));
+
 /**
  * Replaces all `process.env` values (with at least 8 characters) found in the
  * given string with their variable name as a placeholder (e.g. `<TELEGRAM_BOT_TOKEN>`).
@@ -21,7 +47,9 @@ export const sanitizeSecrets = (input: string): string => {
   const entries = Object.entries(process.env)
     .filter(
       (entry): entry is [string, string] =>
-        entry[1] != null && entry[1].trim().length >= 8
+        entry[1] != null &&
+        entry[1].trim().length >= 8 &&
+        !isNonSecretEnvKey(entry[0])
     )
     // Sort by value length descending so longer values are replaced first,
     // avoiding partial replacements when one secret is a prefix of another.
@@ -29,6 +57,9 @@ export const sanitizeSecrets = (input: string): string => {
 
   let result = input;
   for (const [key, value] of entries) {
+    // `includes` scans without allocating; the split/join below copies the
+    // whole string, which matters on multi-kB payloads.
+    if (!result.includes(value)) continue;
     result = result.split(value).join(`<${key}>`);
   }
   return result;

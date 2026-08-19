@@ -13,7 +13,22 @@ import { startDailyNotificationJobs } from "../notifications/notificationSchedul
 import User from "../models/User.ts";
 import { IUser } from "../types.ts";
 import { KEYBOARD_KEYS } from "../entities/Keyboard.ts";
-import { logError, logWarning } from "../utils/debugLogger.ts";
+import {
+  logError,
+  logTelegramDebugStatus,
+  logWarning
+} from "../utils/debugLogger.ts";
+import {
+  isBlankEnv,
+  missingEnvVars,
+  parseBooleanEnv
+} from "../utils/env.utils.ts";
+import { configureMatrixLogging } from "../utils/matrixLogService.ts";
+import {
+  attachSyncHealth,
+  createSyncHealth,
+  SyncingClient
+} from "../utils/matrixSyncHealth.ts";
 import { handleIncomingMessage } from "../utils/messageWorkflow.ts";
 // Persist sync token + crypto state
 import fs from "node:fs";
@@ -21,11 +36,18 @@ import { StoreType } from "@matrix-org/matrix-sdk-crypto-nodejs";
 
 const { MATRIX_HOME_URL, MATRIX_BOT_TOKEN, MATRIX_BOT_TYPE } = process.env;
 if (
-  MATRIX_HOME_URL == undefined ||
-  MATRIX_BOT_TOKEN == undefined ||
-  MATRIX_BOT_TYPE == undefined
+  isBlankEnv(MATRIX_HOME_URL) ||
+  isBlankEnv(MATRIX_BOT_TOKEN) ||
+  isBlankEnv(MATRIX_BOT_TYPE)
 ) {
-  console.log(`Matrix: env is not set, bot did not start \u{1F6A9}`);
+  const missing = missingEnvVars({
+    MATRIX_HOME_URL,
+    MATRIX_BOT_TOKEN,
+    MATRIX_BOT_TYPE
+  });
+  console.log(
+    `Matrix: env is not set (missing: ${missing.join(", ")}), bot did not start \u{1F6A9}`
+  );
   process.exit(0);
 }
 
@@ -37,9 +59,15 @@ if (!["Matrix", "Tchap"].some((m) => m === MATRIX_BOT_TYPE)) {
 }
 const matrixApp = MATRIX_BOT_TYPE as "Matrix" | "Tchap";
 
+// Summarize the SDK's own output before it emits anything: unconfigured, it
+// prints whole error bodies and untagged lines shared with the other bots.
+configureMatrixLogging(matrixApp);
+logTelegramDebugStatus();
+
 // Global constant to check if encryption is enabled for the bot
-export const MATRIX_ENCRYPTION_ENABLED = Boolean(
-  process.env.MATRIX_ENCRYPTION_ENABLED ?? "TRUE"
+export const MATRIX_ENCRYPTION_ENABLED = parseBooleanEnv(
+  process.env.MATRIX_ENCRYPTION_ENABLED,
+  true
 );
 
 if (MATRIX_ENCRYPTION_ENABLED) {
@@ -73,6 +101,13 @@ const client = MATRIX_ENCRYPTION_ENABLED
       MATRIX_BOT_TOKEN,
       storageProvider
     );
+
+// The sync loop retries forever and only writes to the SDK logger, so without
+// this an outage is invisible outside stdout.
+attachSyncHealth(
+  client as unknown as SyncingClient,
+  createSyncHealth(matrixApp)
+);
 
 AutojoinRoomsMixin.setupOnClient(client);
 AutojoinUpgradedRoomsMixin.setupOnClient(client); // optional but nice to have
@@ -316,6 +351,12 @@ await (async function () {
     console.log(`${matrixApp}: JOEL started successfully \u{2705}`);
   } catch (error) {
     await logError(matrixApp, "Failed to start app", error);
+    // Mongoose keeps the event loop alive, so returning here would leave a
+    // process that syncs nothing and schedules no notifications while the
+    // container still reports as healthy.
+    process.exitCode = 1;
+    await mongodbDisconnect().catch(() => undefined);
+    process.exit(1);
   }
 })();
 

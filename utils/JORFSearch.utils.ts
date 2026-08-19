@@ -6,34 +6,38 @@ import {
   mergeJORFSearchItemCleaningStats
 } from "../entities/JORFSearchResponse.ts";
 import { MessageApp, WikidataId } from "../types.ts";
-import axios, {
-  AxiosResponse,
-  InternalAxiosRequestConfig,
-  isAxiosError
-} from "axios";
+import axios, { AxiosResponse, InternalAxiosRequestConfig } from "axios";
 import umami from "./umami.ts";
 import {
-  cleanJORFPublication,
   JORFSearchPublication,
-  JORFSearchResponseMeta,
   saveMetaPublications
 } from "../entities/JORFSearchResponseMeta.ts";
 import { FunctionTags } from "../entities/FunctionTags.ts";
 import { dateToString, JORFtoDate } from "./date.utils.ts";
-import { logError, logErrorForApps } from "./debugLogger.ts";
+import { logError, logErrorForApps, logWarning } from "./debugLogger.ts";
 import { IPublication, Publication } from "../models/Publication.ts";
+import {
+  assertJsonPayload,
+  REQUEST_TIMEOUT_MS,
+  RETRY_MAX,
+  shouldRetry,
+  waitBeforeRetry
+} from "./httpRetry.utils.ts";
+import { fetchLegifranceMetaDay } from "./legifrance.utils.ts";
 
 // Per Wikimedia policy, provide a descriptive agent with contact info.
 const USER_AGENT = "JOEL/1.0 (contact@joel-officiel.fr)";
 
-const RETRY_MAX = 5;
-const BASE_RETRY_DELAY_MS = 1000;
 const JORFSEARCH_CALLS_CONCURRENCY = 1;
-// Prevent individual HTTP requests from hanging indefinitely.
-// With RETRY_MAX=5 the worst-case wall-time per call-site is:
-//   (RETRY_MAX+1) × REQUEST_TIMEOUT_MS + Σ(1..RETRY_MAX)×BASE_RETRY_DELAY_MS
-//   = 6 × 10 000 + 15 000 = 75 000 ms  (< Telegraf's 90 s handler timeout)
-const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * Consecutive fully-failed chunks before the remaining days of a range are
+ * abandoned. One failed day is a routine hiccup, and with a chunk of
+ * {@link JORFSEARCH_CALLS_CONCURRENCY} day it must not condemn a whole
+ * backfill; a run of them means the source is down and each further day would
+ * burn `RETRY_MAX + 1` attempts against it for nothing.
+ */
+const CONSECUTIVE_FAILED_CHUNKS_BEFORE_ABANDON = 3;
 
 const jorfAxios = axios.create({
   timeout: REQUEST_TIMEOUT_MS,
@@ -46,12 +50,6 @@ interface CustomInternalAxiosRequestConfig extends InternalAxiosRequestConfig {
     responseUrl?: string;
   };
   responseURL?: string;
-}
-
-function shouldRetry(e: unknown): boolean {
-  if (!isAxiosError(e)) return false;
-  const s = e.response?.status;
-  return !(s && s >= 400 && s < 500 && s !== 408 && s !== 429);
 }
 
 function logJORFSearchError(
@@ -130,9 +128,7 @@ export async function callJORFSearchPeople(
   } catch (error) {
     if (shouldRetry(error)) {
       if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
+        await waitBeforeRetry(retryNumber);
         return await callJORFSearchPeople(
           peopleName,
           messageApp,
@@ -176,12 +172,8 @@ async function callJORFSearchDay(
         )
       )
       .then((res) => {
-        if (res.data === null || typeof res.data === "string") {
-          logJORFSearchError("date");
-          console.log("JORFSearch request for date returned null");
-          return null;
-        }
-        const rawItems = res.data.filter((m) => m.source_date === dateYMD);
+        const data = assertJsonPayload(res.data, "JORFSearch (day records)");
+        const rawItems = data.filter((m) => m.source_date === dateYMD);
         const cleanedItems = cleanJORFItems(rawItems);
         return {
           items: cleanedItems.cleanItems,
@@ -191,9 +183,7 @@ async function callJORFSearchDay(
   } catch (error) {
     if (shouldRetry(error)) {
       if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
+        await waitBeforeRetry(retryNumber);
         return await callJORFSearchDay(day, messageApps, retryNumber + 1);
       } else {
         logJORFSearchError("date");
@@ -244,10 +234,12 @@ function buildDayRange(startDate: Date): Date[] {
  * Walks `days` in chunks of {@link JORFSEARCH_CALLS_CONCURRENCY}, recording the
  * days that came back empty-handed.
  *
- * Once a whole chunk fails, JORFSearch is treated as down and the remaining days
- * are marked failed without being requested: each day already burns
- * `RETRY_MAX + 1` attempts, so a multi-day backfill against a dead host would
- * otherwise spend minutes hammering it before reaching the notification stage.
+ * After {@link CONSECUTIVE_FAILED_CHUNKS_BEFORE_ABANDON} chunks fail back to
+ * back, the source is treated as down and the remaining days are marked failed
+ * without being requested: each day already burns `RETRY_MAX + 1` attempts, so
+ * a multi-day backfill against a dead host would otherwise spend minutes
+ * hammering it before reaching the notification stage. Isolated failures do not
+ * trip it, so one bad day no longer condemns the days behind it.
  */
 async function fetchDayRange<T>(
   days: Date[],
@@ -255,6 +247,7 @@ async function fetchDayRange<T>(
 ): Promise<{ results: T[]; failedDates: string[] }> {
   const results: T[] = [];
   const failedDates: string[] = [];
+  let consecutiveFailedChunks = 0;
 
   const limit = JORFSEARCH_CALLS_CONCURRENCY;
   for (let i = 0; i < days.length; i += limit) {
@@ -267,6 +260,12 @@ async function fetchDayRange<T>(
     });
 
     if (subResults.every((result) => result == null)) {
+      consecutiveFailedChunks += 1;
+    } else {
+      consecutiveFailedChunks = 0;
+    }
+
+    if (consecutiveFailedChunks >= CONSECUTIVE_FAILED_CHUNKS_BEFORE_ABANDON) {
       for (const day of days.slice(i + limit)) {
         failedDates.push(dateToString(day, "YMD"));
       }
@@ -316,95 +315,14 @@ export async function getJORFRecordsFromDate(
   };
 }
 
-export interface JORFSearchMetaDayResult {
-  items: JORFSearchPublication[];
-  stats: {
-    raw_item_nb: number;
-    clean_item_nb: number;
-    dropped_item_nb: number;
-  };
-}
-
-export async function callJORFSearchMetaDay(
-  day: Date,
-  messageApps: MessageApp[],
-  retryNumber = 0,
-  saveToInternalDb = true
-): Promise<JORFSearchMetaDayResult | null> {
-  try {
-    const dateYMD = dateToString(day, "YMD");
-
-    const previousDay = new Date(day);
-    // subtract one day
-    previousDay.setDate(previousDay.getDate() - 1);
-    const previousDayYMD = dateToString(previousDay, "YMD");
-
-    return await jorfAxios
-      .get<JORFSearchResponseMeta>(
-        encodeURI(
-          `https://jorfsearch.steinertriples.ch/meta/search?date=${dateYMD}`
-        )
-      )
-      .then((res) => {
-        if (res.data === null || typeof res.data === "string") {
-          logJORFSearchError("meta");
-          console.log("JORFSearch request for meta returned null");
-          return null;
-        }
-        const rawItems = res.data.filter((m) => m.date === previousDayYMD);
-        const cleanedItems = cleanJORFPublication(rawItems);
-
-        if (saveToInternalDb) {
-          void saveMetaPublications(cleanedItems, messageApps);
-        }
-        return {
-          items: cleanedItems,
-          stats: {
-            raw_item_nb: rawItems.length,
-            clean_item_nb: cleanedItems.length,
-            dropped_item_nb: rawItems.length - cleanedItems.length
-          }
-        };
-      });
-  } catch (error) {
-    if (shouldRetry(error)) {
-      if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
-        return await callJORFSearchMetaDay(
-          day,
-          messageApps,
-          retryNumber + 1,
-          saveToInternalDb
-        );
-      }
-      logJORFSearchError("meta");
-      await logErrorForApps(
-        messageApps,
-        `JORFSearch request for meta aborted after ${String(RETRY_MAX)} tries`,
-        error
-      );
-    } else {
-      await logErrorForApps(
-        messageApps,
-        "Error in callJORFSearchMetaDay",
-        error
-      );
-    }
-  }
-  return null;
-}
-
 export async function getJORFMetaRecordsFromDate(
   startDate: Date,
   messageApps: MessageApp[]
 ): Promise<JORFRangeResult<JORFSearchPublication>> {
   const days = buildDayRange(startDate);
 
-  const { results, failedDates } = await fetchDayRange(
-    days,
-    (day) => callJORFSearchMetaDay(day, messageApps, 0, false) // saved to dB in batch below
+  const { results, failedDates } = await fetchDayRange(days, (day) =>
+    fetchLegifranceMetaDay(day, messageApps)
   );
 
   const allItems: JORFSearchPublication[] = [];
@@ -455,12 +373,8 @@ export async function callJORFSearchTag(
         getJORFSearchLinkFunctionTag(tag, true, tagValue)
       )
       .then((res) => {
-        if (res.data === null || typeof res.data === "string") {
-          logJORFSearchError("function_tag");
-          console.log("JORFSearch request for tag returned null");
-          return null;
-        }
-        const cleanedItems = cleanJORFItems(res.data);
+        const data = assertJsonPayload(res.data, "JORFSearch (function tag)");
+        const cleanedItems = cleanJORFItems(data);
         umami.log({
           event: "/jorfsearch-request-tag",
           messageApp,
@@ -471,9 +385,7 @@ export async function callJORFSearchTag(
   } catch (error) {
     if (shouldRetry(error)) {
       if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
+        await waitBeforeRetry(retryNumber);
         return await callJORFSearchTag(
           tag,
           messageApp,
@@ -508,12 +420,8 @@ export async function callJORFSearchOrganisation(
         )
       )
       .then((res) => {
-        if (res.data === null || typeof res.data === "string") {
-          logJORFSearchError("organisation");
-          console.log("JORFSearch request for organisation returned null");
-          return null;
-        }
-        const cleanedItems = cleanJORFItems(res.data);
+        const data = assertJsonPayload(res.data, "JORFSearch (organisation)");
+        const cleanedItems = cleanJORFItems(data);
         umami.log({
           event: "/jorfsearch-request-organisation",
           messageApp,
@@ -524,9 +432,7 @@ export async function callJORFSearchOrganisation(
   } catch (error) {
     if (shouldRetry(error)) {
       if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
+        await waitBeforeRetry(retryNumber);
         return await callJORFSearchOrganisation(
           wikiId,
           messageApp,
@@ -604,12 +510,8 @@ export async function searchOrganisationWikidataId(
     return await jorfAxios
       .get<{ name: string; id: WikidataId }[] | null>(url)
       .then((res) => {
-        if (res.data === null || typeof res.data === "string") {
-          logJORFSearchError("wikidata");
-          console.log("JORFSearch request for wikidata returned null");
-          return null;
-        }
-        return res.data.map((o) => ({
+        const data = assertJsonPayload(res.data, "JORFSearch (wikidata)");
+        return data.map((o) => ({
           nom: o.name,
           wikidataId: o.id
         }));
@@ -617,9 +519,7 @@ export async function searchOrganisationWikidataId(
   } catch (error) {
     if (shouldRetry(error)) {
       if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
+        await waitBeforeRetry(retryNumber);
         return await searchOrganisationWikidataId(
           org_name,
           messageApp,
@@ -645,9 +545,39 @@ export async function searchOrganisationWikidataId(
   return null;
 }
 
+/**
+ * References that are absent from the JO summary of their own publication day.
+ * Bulletins officiels (BOMI, BOEN, BOSanté and the others) are legitimate
+ * sources that are never published at the JO, so they can never be resolved.
+ * Without this, every message from every user re-fetches the same whole day for
+ * the same doomed reference.
+ */
+const missingReferenceCache = new Map<string, number>();
+const MISSING_REFERENCE_TTL_MS = 60 * 60 * 1000;
+
+/** Test seam: drops the memo of references known to be absent from the JO. */
+export function resetMissingReferenceCache(): void {
+  missingReferenceCache.clear();
+}
+
+function isKnownMissingReference(reference: string): boolean {
+  const seenAt = missingReferenceCache.get(reference);
+  if (seenAt === undefined) return false;
+  if (Date.now() - seenAt < MISSING_REFERENCE_TTL_MS) return true;
+  missingReferenceCache.delete(reference);
+  return false;
+}
+
+/**
+ * Ensures the JO publication carrying `reference` is stored locally, fetching
+ * the summary of each day the reference was seen on until one of them holds it.
+ *
+ * A reference can carry several dates when a document spans more than one JO
+ * edition, and only the day that actually lists it resolves the lookup.
+ */
 async function checkReferenceInDb(
   reference: string,
-  dateYMD: string,
+  dateYMDs: string[],
   messageApp: MessageApp
 ): Promise<void> {
   try {
@@ -656,40 +586,51 @@ async function checkReferenceInDb(
     });
     if (res != null) return;
 
-    const dateSplit = dateYMD.split("-").map((s) => parseInt(s)); // YYYY-MM-DD
-    if (dateSplit.some((s) => isNaN(s))) {
-      await logError(
-        messageApp,
-        `Error parsing date ${dateYMD} in items from reference ${reference}`
-      );
-      return;
-    }
-    // callJORFSearchMetaDay queries the API with the given date but filters by previousDay
-    // So we need to add 1 day to get publications with date === referenceDate
-    // Note: Date constructor handles day overflow correctly (e.g., Jan 32 → Feb 1)
-    const queryDate = new Date(
-      dateSplit[0],
-      dateSplit[1] - 1,
-      dateSplit[2] + 1
+    if (isKnownMissingReference(reference)) return;
+
+    const validDates = dateYMDs.filter(
+      (dateYMD) => !dateYMD.split("-").map(Number).some(isNaN)
     );
-    const publicationItem = await callJORFSearchMetaDay(
-      queryDate,
-      [messageApp],
-      0,
-      false
-    ); // do not save to db yet
-    if (publicationItem == null) {
+    if (validDates.length === 0) {
       await logError(
         messageApp,
-        `No meta publication found for reference ${reference} on date ${dateYMD}`
+        `Error parsing dates ${dateYMDs.join(", ")} in items from reference ${reference}`
       );
       return;
     }
-    await saveMetaPublications(publicationItem.items, [messageApp]); // save to db (if not already saved by a previous reference)
+
+    let anyDayFetched = false;
+    for (const dateYMD of validDates) {
+      const publicationDay = await fetchLegifranceMetaDay(JORFtoDate(dateYMD), [
+        messageApp
+      ]);
+      if (publicationDay == null) continue;
+      anyDayFetched = true;
+
+      // Persist the whole day regardless: the other texts of that edition are
+      // very likely to be looked up next.
+      await saveMetaPublications(publicationDay.items, [messageApp]);
+
+      if (publicationDay.items.some((item) => item.id === reference)) return;
+    }
+
+    if (!anyDayFetched) {
+      await logError(
+        messageApp,
+        `Could not fetch the JO summary for reference ${reference} on ${validDates.join(", ")}`
+      );
+      return;
+    }
+
+    missingReferenceCache.set(reference, Date.now());
+    await logWarning(
+      messageApp,
+      `Reference ${reference} is absent from the JO summary of ${validDates.join(", ")}; it is likely published in a bulletin officiel rather than at the JO`
+    );
   } catch (error) {
     await logError(
       messageApp,
-      `Error in checkReferenceInDb for reference ${reference} on date ${dateYMD}`,
+      `Error in checkReferenceInDb for reference ${reference} on ${dateYMDs.join(", ")}`,
       error
     );
   }
@@ -708,12 +649,8 @@ export async function callJORFSearchReference(
         )
       )
       .then((res) => {
-        if (res.data === null || typeof res.data === "string") {
-          logJORFSearchError("reference");
-          console.log("JORFSearch request for reference returned null");
-          return null;
-        }
-        const cleanedItems = cleanJORFItems(res.data);
+        const data = assertJsonPayload(res.data, "JORFSearch (reference)");
+        const cleanedItems = cleanJORFItems(data);
         umami.log({
           event: "/jorfsearch-request-reference",
           messageApp,
@@ -723,7 +660,7 @@ export async function callJORFSearchReference(
 
         void checkReferenceInDb(
           reference,
-          cleanedItems.cleanItems[0].source_date,
+          [...new Set(cleanedItems.cleanItems.map((i) => i.source_date))],
           messageApp
         ); // check db in the background
         return cleanedItems.cleanItems;
@@ -731,9 +668,7 @@ export async function callJORFSearchReference(
   } catch (error) {
     if (shouldRetry(error)) {
       if (retryNumber < RETRY_MAX) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, BASE_RETRY_DELAY_MS * (retryNumber + 1))
-        );
+        await waitBeforeRetry(retryNumber);
         return await callJORFSearchReference(
           reference,
           messageApp,

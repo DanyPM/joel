@@ -79,8 +79,11 @@ export const triggerPendingNotifications = async (
     const limit = pLimit(FETCH_CONCURRENCY);
     const itemsOut = new Map<JORFReference, JORFSearchItem[]>(); // keep order
 
+    // The same reference can appear in several pending batches; fetch it once.
+    const uniqueReferences = [...new Set(source_id_items)];
+
     await Promise.all(
-      source_id_items.map((ref) =>
+      uniqueReferences.map((ref) =>
         limit(async () => {
           const res = await callJORFSearchReference(ref, session.messageApp);
           if (res == null) {
@@ -96,7 +99,7 @@ export const triggerPendingNotifications = async (
     );
 
     const candidateJORFPublications: JORFSearchPublication[] =
-      await Publication.find({ source_id: { $in: source_id_publications } });
+      await Publication.find({ id: { $in: source_id_publications } });
 
     const candidateJORFSearchItems: JORFSearchItem[] = Array.from(
       itemsOut.values()

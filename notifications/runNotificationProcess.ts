@@ -56,6 +56,7 @@ export function coverageCursorFor(
 
 async function fetchRange<T>(
   label: string,
+  source: string,
   fetch: () => Promise<JORFRangeResult<T>>,
   targetApps: MessageApp[],
   windowNow: Date
@@ -66,7 +67,7 @@ async function fetchRange<T>(
   } catch (error) {
     await logErrorForApps(
       targetApps,
-      `Could not fetch JORF ${label}: the matching notifications are skipped for this run.`,
+      `Could not fetch ${label}: the matching notifications are skipped for this run.`,
       error
     );
     return { items: [], coverageCursor: windowNow, degraded: true };
@@ -80,8 +81,8 @@ async function fetchRange<T>(
   await logErrorForApps(
     targetApps,
     allDaysFailed
-      ? `JORFSearch is unreachable for ${label}: no day of the range could be fetched, the matching notifications are skipped for this run.`
-      : `JORFSearch returned no data for ${String(range.failedDates.length)}/${String(range.requestedDays)} day(s) of ${label} (${range.failedDates.join(", ")}). Notifications are sent for the days that were fetched, and follows are not advanced past ${range.failedDates.reduce((a, b) => (a < b ? a : b))} so the gap is picked up on a later run.`
+      ? `${source} is unreachable for ${label}: no day of the range could be fetched, the matching notifications are skipped for this run.`
+      : `${source} returned no data for ${String(range.failedDates.length)}/${String(range.requestedDays)} day(s) of ${label} (${range.failedDates.join(", ")}). Notifications are sent for the days that were fetched, and follows are not advanced past ${range.failedDates.reduce((a, b) => (a < b ? a : b))} so the gap is picked up on a later run.`
   );
 
   // A fully failed range is indistinguishable from "nothing was published", and
@@ -254,13 +255,15 @@ export async function runNotificationProcess(
     // Each source is fetched independently: one being unreachable must not cost
     // users the notifications the other one can still deliver.
     const records = await fetchRange(
-      "records",
+      "JORF records",
+      "JORFSearch",
       () => getJORFRecordsFromDate(startDate, targetApps),
       targetApps,
       start
     );
     const metaRecords = await fetchRange(
       "meta publications",
+      "Legifrance",
       () => getJORFMetaRecordsFromDate(startDate, targetApps),
       targetApps,
       start
