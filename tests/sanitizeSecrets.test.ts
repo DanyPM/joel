@@ -73,6 +73,24 @@ describe("sanitizeSecrets", () => {
     expect(result).toBe("value=<LONG_SECRET>");
   });
 
+  it("leaves the value of a known non-secret variable alone", () => {
+    process.env.NODE_ENV = "production";
+    const result = sanitizeSecrets("Bot started in production mode");
+    expect(result).toBe("Bot started in production mode");
+  });
+
+  it("leaves npm runner variables alone", () => {
+    process.env.npm_lifecycle_event = "start-mx:prod";
+    const result = sanitizeSecrets("Ran start-mx:prod");
+    expect(result).toBe("Ran start-mx:prod");
+  });
+
+  it("still redacts an unrecognized variable, so a new secret is not leaked", () => {
+    process.env.SOME_NEW_VAR = "unlisted-value-1234";
+    const result = sanitizeSecrets("Saw unlisted-value-1234 here");
+    expect(result).toBe("Saw <SOME_NEW_VAR> here");
+  });
+
   it("returns the input unchanged when process.env has no qualifying values", () => {
     // Replace all env vars with values >= 8 chars with short placeholders
     for (const key of Object.keys(process.env)) {
