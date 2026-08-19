@@ -93,7 +93,6 @@ describe("triggerPendingNotifications", () => {
   it("fetches refs, dispatches and clears the pending pile", async () => {
     await Publication.create({
       id: "M1",
-      source_id: "M1",
       date: "2026-06-20",
       date_obj: new Date(),
       title: "Decret",
@@ -133,9 +132,64 @@ describe("triggerPendingNotifications", () => {
       user._id.toString()
     );
     expect(notifyArgs[6]).toBe(true);
+    // Publications are keyed by `id`; a lookup on any other field returns
+    // nothing and the pending pile is cleared without delivering them.
+    expect((notifyArgs[1] as { id: string }[]).map((p) => p.id)).toEqual([
+      "M1"
+    ]);
     const refreshed = await User.findById(user._id);
     expect(refreshed?.pendingNotifications.length).toBe(0);
     expect(refreshed?.waitingReengagement).toBe(false);
+  });
+
+  it("delivers a pending alert-string notification on its own", async () => {
+    await Publication.create({
+      id: "M2",
+      date: "2026-06-21",
+      date_obj: new Date(),
+      title: "Arrete",
+      tags: {}
+    });
+    const user = await userWithPending([
+      {
+        notificationType: "meta",
+        source_ids: ["M2"],
+        insertDate: new Date(),
+        items_nb: 1
+      }
+    ]);
+
+    await triggerPendingNotifications(
+      makeSession(await User.findById(user._id))
+    );
+
+    const notifyArgs = notifyAllSpy.mock.calls[0] as unknown[];
+    expect((notifyArgs[1] as { id: string }[]).map((p) => p.id)).toEqual([
+      "M2"
+    ]);
+  });
+
+  it("fetches a reference repeated across batches only once", async () => {
+    const user = await userWithPending([
+      {
+        notificationType: "people",
+        source_ids: ["R1"],
+        insertDate: new Date(),
+        items_nb: 1
+      },
+      {
+        notificationType: "organisation",
+        source_ids: ["R1"],
+        insertDate: new Date(),
+        items_nb: 1
+      }
+    ]);
+
+    await triggerPendingNotifications(
+      makeSession(await User.findById(user._id))
+    );
+
+    expect(callRefSpy).toHaveBeenCalledTimes(1);
   });
 
   it("logs when a ref fetch returns nothing", async () => {

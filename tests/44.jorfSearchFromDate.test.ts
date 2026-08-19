@@ -1,18 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import mongoose from "mongoose";
 
-// Shared spy for the internal jorfAxios instance's `.get`.
-const { getSpy } = vi.hoisted(() => ({ getSpy: vi.fn() }));
+// Shared spies for the internal axios instances. `axios.create()` is stubbed to
+// hand the same object to every module, so the URL tells the callers apart.
+const { getSpy, postSpy } = vi.hoisted(() => ({
+  getSpy: vi.fn(),
+  postSpy: vi.fn()
+}));
 
-// Mock axios so `axios.create()` returns an object whose `.get` we control.
-// Keep the real `isAxiosError` so shouldRetry keeps working.
+// Mock axios so `axios.create()` returns an object whose `.get`/`.post` we
+// control. Keep the real `isAxiosError` so shouldRetry keeps working.
 vi.mock("axios", async (importActual) => {
   const actual = await importActual<typeof import("axios")>();
   return {
     ...actual,
     default: {
       ...(actual.default as object),
-      create: () => ({ get: getSpy })
+      create: () => ({ get: getSpy, post: postSpy })
     },
     isAxiosError: actual.isAxiosError
   };
@@ -27,6 +31,7 @@ vi.mock("../utils/umami.ts", () => ({
 }));
 vi.mock("../utils/debugLogger.ts", () => ({
   logError: vi.fn(() => Promise.resolve()),
+  logWarning: vi.fn(() => Promise.resolve()),
   logErrorForApps: vi.fn(() => Promise.resolve())
 }));
 
@@ -34,6 +39,7 @@ import {
   getJORFRecordsFromDate,
   getJORFMetaRecordsFromDate
 } from "../utils/JORFSearch.utils.ts";
+import { resetLegifranceCaches } from "../utils/legifrance.utils.ts";
 
 // Build a valid raw JORFSearch "people" record for a given source_date (YMD).
 function rawItem(source_date: string) {
@@ -48,18 +54,10 @@ function rawItem(source_date: string) {
   };
 }
 
-// Build a valid raw meta publication for a given date (YMD).
-function rawMeta(date: string) {
-  return {
-    id: "JORFTEXT" + date.replace(/-/g, ""),
-    date,
-    title: "Titre de test",
-    tags: { mesure_nominative: true }
-  };
-}
-
-// Mirrors RETRY_MAX in JORFSearch.utils.ts.
+// Mirrors RETRY_MAX in httpRetry.utils.ts.
 const RETRY_MAX = 5;
+// Mirrors CONSECUTIVE_FAILED_CHUNKS_BEFORE_ABANDON in JORFSearch.utils.ts.
+const FAILED_CHUNKS_BEFORE_ABANDON = 3;
 
 // The day URL for the "records" endpoint is keyed on DD-MM-YYYY.
 function dmy(d: Date): string {
@@ -68,20 +66,68 @@ function dmy(d: Date): string {
   return `${dd}-${mm}-${String(d.getFullYear())}`;
 }
 
-function ymdMinusOneDay(ymd: string): string {
-  const [y, m, d] = ymd.split("-").map((s) => parseInt(s));
-  const dt = new Date(y, m - 1, d);
-  dt.setDate(dt.getDate() - 1);
-  const yy = String(dt.getFullYear());
-  const mm = String(dt.getMonth() + 1).padStart(2, "0");
-  const dd = String(dt.getDate()).padStart(2, "0");
-  return `${yy}-${mm}-${dd}`;
+/** A Legifrance JO summary holding one text per requested day. */
+function jorfContResponse(textId: string) {
+  return {
+    data: {
+      items: [
+        {
+          joCont: {
+            id: "JORFCONT000000000001",
+            structure: {
+              liens: [{ id: textId, titre: "Titre de test" }]
+            }
+          }
+        }
+      ]
+    }
+  };
+}
+
+/**
+ * Routes the Legifrance calls: the token POST, the no-JO day list GET, and the
+ * per-day summary POST. `onSummary` decides what a summary request answers.
+ */
+function mockLegifrance(onSummary: (epochMs: number) => unknown) {
+  postSpy.mockImplementation((url: string, payload: unknown) => {
+    if (url.includes("oauth")) {
+      return Promise.resolve({
+        data: { access_token: "test-token", expires_in: 3600 }
+      });
+    }
+    const { date } = payload as { date: number };
+    return Promise.resolve(onSummary(date));
+  });
+}
+
+function mockDatesWithoutJo(days: number[] = []) {
+  return (url: string) => {
+    if (url.includes("datesWithoutJo")) {
+      return Promise.resolve({ data: { lstDateDisabled: days } });
+    }
+    return Promise.resolve({ data: [], request: {} });
+  };
+}
+
+/** Drives the retry back-off without spending the test's wall-clock on it. */
+async function withFakeTimers<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const pending = run();
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
 }
 
 beforeEach(async () => {
   if (!mongoose.connection.db) throw new Error("no db");
   await mongoose.connection.db.dropDatabase();
   vi.clearAllMocks();
+  resetLegifranceCaches();
+  process.env.LEGIFRANCE_CLIENT_ID = "test-id";
+  process.env.LEGIFRANCE_CLIENT_SECRET = "test-secret";
 });
 
 describe("getJORFRecordsFromDate", () => {
@@ -122,17 +168,22 @@ describe("getJORFRecordsFromDate", () => {
     ).toBe(3);
   });
 
-  it("tolerates a day returning a null/string payload and reports it as failed", async () => {
+  it("retries a 2xx carrying a string body before reporting the day failed", async () => {
     getSpy.mockResolvedValue({ data: "error string", request: {} });
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const result = await getJORFRecordsFromDate(new Date(today), ["Telegram"]);
+
+    const result = await withFakeTimers(() =>
+      getJORFRecordsFromDate(new Date(today), ["Telegram"])
+    );
 
     expect(result.items).toEqual([]);
     expect(result.requestedDays).toBe(1);
     expect(result.failedDates).toHaveLength(1);
-    expect(getSpy).toHaveBeenCalledTimes(1);
+    // An HTML login or overload page is transient, so it burns the retries
+    // rather than being read as "this day holds no records".
+    expect(getSpy).toHaveBeenCalledTimes(RETRY_MAX + 1);
   });
 
   it("keeps the days that succeeded when another day fails", async () => {
@@ -151,14 +202,40 @@ describe("getJORFRecordsFromDate", () => {
       return Promise.resolve({ data: [rawItem(ymd)], request: {} });
     });
 
-    const result = await getJORFRecordsFromDate(startDate, ["Telegram"]);
+    const result = await withFakeTimers(() =>
+      getJORFRecordsFromDate(startDate, ["Telegram"])
+    );
 
     expect(result.items).toHaveLength(1);
     expect(result.requestedDays).toBe(2);
     expect(result.failedDates).toHaveLength(1);
   });
 
-  it("stops requesting further days once JORFSearch is unreachable", async () => {
+  it("keeps requesting days after a single failed day", async () => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() - 2); // 3-day range, newest first
+
+    const todayDMY = dmy(today);
+    getSpy.mockImplementation((url: string) => {
+      const m = /(\d{2})-(\d{2})-(\d{4})/.exec(url);
+      // Only the newest day fails; the two older ones must still be requested.
+      if (m?.[0] === todayDMY)
+        return Promise.resolve({ data: "error string", request: {} });
+      const ymd = `${m?.[3] ?? "2024"}-${m?.[2] ?? "01"}-${m?.[1] ?? "01"}`;
+      return Promise.resolve({ data: [rawItem(ymd)], request: {} });
+    });
+
+    const result = await withFakeTimers(() =>
+      getJORFRecordsFromDate(startDate, ["Telegram"])
+    );
+
+    expect(result.failedDates).toHaveLength(1);
+    expect(result.items).toHaveLength(2);
+  });
+
+  it("stops requesting further days once the source stays unreachable", async () => {
     getSpy.mockRejectedValue(
       Object.assign(new Error("connect ECONNREFUSED"), {
         isAxiosError: true,
@@ -169,23 +246,19 @@ describe("getJORFRecordsFromDate", () => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const startDate = new Date(today);
-    startDate.setDate(today.getDate() - 3); // 4-day range
+    startDate.setDate(today.getDate() - 5); // 6-day range
 
-    // Fake timers so the retry back-off does not cost the test its wall-clock.
-    vi.useFakeTimers();
-    let result;
-    try {
-      const pending = getJORFRecordsFromDate(startDate, ["Telegram"]);
-      await vi.runAllTimersAsync();
-      result = await pending;
-    } finally {
-      vi.useRealTimers();
-    }
+    const result = await withFakeTimers(() =>
+      getJORFRecordsFromDate(startDate, ["Telegram"])
+    );
 
     expect(result.items).toEqual([]);
-    // Every day is reported missing, but only the first one burned its retries.
-    expect(result.failedDates).toHaveLength(4);
-    expect(getSpy).toHaveBeenCalledTimes(RETRY_MAX + 1);
+    // Every day is reported missing, but only the days probed before the
+    // breaker tripped burned their retries.
+    expect(result.failedDates).toHaveLength(6);
+    expect(getSpy).toHaveBeenCalledTimes(
+      FAILED_CHUNKS_BEFORE_ABANDON * (RETRY_MAX + 1)
+    );
   });
 
   it("does not mutate the caller's startDate", async () => {
@@ -203,26 +276,21 @@ describe("getJORFRecordsFromDate", () => {
 
 describe("getJORFMetaRecordsFromDate", () => {
   it("aggregates meta publications across a multi-day range and persists them", async () => {
-    getSpy.mockImplementation((url: string) => {
-      // meta URL: .../meta/search?date=YYYY-MM-DD
-      const m = /date=(\d{4}-\d{2}-\d{2})/.exec(url);
-      const queryDate = m ? m[1] : "2024-01-02";
-      // callJORFSearchMetaDay filters by (queryDate - 1 day)
-      const prev = ymdMinusOneDay(queryDate);
-      return Promise.resolve({ data: [rawMeta(prev)], request: {} });
-    });
+    getSpy.mockImplementation(mockDatesWithoutJo());
+    mockLegifrance((epochMs) => jorfContResponse("JORFTEXT" + String(epochMs)));
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const startDate = new Date(today);
     startDate.setDate(today.getDate() - 2); // 3 chunks of size 1
 
-    const { items: results } = await getJORFMetaRecordsFromDate(startDate, [
-      "Telegram"
-    ]);
+    const { items: results, failedDates } = await getJORFMetaRecordsFromDate(
+      startDate,
+      ["Telegram"]
+    );
 
+    expect(failedDates).toEqual([]);
     expect(results).toHaveLength(3);
-    expect(getSpy).toHaveBeenCalledTimes(3);
     // sorted ascending by date
     for (let i = 1; i < results.length; i++) {
       expect(new Date(results[i].date).getTime()).toBeGreaterThanOrEqual(
@@ -241,13 +309,16 @@ describe("getJORFMetaRecordsFromDate", () => {
   });
 
   it("reports a failed day instead of throwing", async () => {
-    getSpy.mockResolvedValue({ data: "error string", request: {} });
+    getSpy.mockImplementation(mockDatesWithoutJo());
+    // A summary with no container means the edition could not be established.
+    mockLegifrance(() => ({ data: { items: [] } }));
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const result = await getJORFMetaRecordsFromDate(new Date(today), [
-      "Telegram"
-    ]);
+
+    const result = await withFakeTimers(() =>
+      getJORFMetaRecordsFromDate(new Date(today), ["Telegram"])
+    );
 
     expect(result.items).toEqual([]);
     expect(result.requestedDays).toBe(1);
