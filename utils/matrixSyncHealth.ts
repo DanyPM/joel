@@ -11,6 +11,13 @@ export const SYNC_ALERT_AFTER_MS = 2 * 60 * 1000;
 /** Delay before a still-failing sync is reported again. */
 export const SYNC_REALERT_COOLDOWN_MS = 30 * 60 * 1000;
 
+/**
+ * How long syncs must keep succeeding before the outage is called over.
+ * A flaky homeserver answers one sync then fails the next, so a single success
+ * is not a recovery.
+ */
+export const SYNC_RECOVERY_CONFIRM_MS = 10 * 60 * 1000;
+
 export interface SyncHealth {
   recordFailure: (error: unknown) => Promise<void>;
   recordSuccess: () => Promise<void>;
@@ -40,7 +47,8 @@ const formatOutage = (ms: number): string => {
  * The SDK retries a failed sync forever and only writes to its own logger, so
  * a homeserver outage or a rejected token is otherwise invisible: no alert, no
  * umami event, while the app keeps reporting a successful start. This turns a
- * failing streak into a single alert, and reports the recovery.
+ * failing streak into a single alert, and reports the recovery once syncs have
+ * held for {@link SYNC_RECOVERY_CONFIRM_MS}.
  */
 export const createSyncHealth = (
   messageApp: MessageApp,
@@ -50,11 +58,13 @@ export const createSyncHealth = (
   let failureCount = 0;
   let firstFailureAt: number | null = null;
   let lastAlertAt: number | null = null;
+  let recoveringSince: number | null = null;
 
   const reset = () => {
     failureCount = 0;
     firstFailureAt = null;
     lastAlertAt = null;
+    recoveringSince = null;
   };
 
   return {
@@ -62,6 +72,7 @@ export const createSyncHealth = (
       const at = now();
       failureCount += 1;
       firstFailureAt ??= at;
+      recoveringSince = null;
 
       const worthReporting =
         failureCount >= SYNC_ALERT_AFTER_FAILURES ||
@@ -82,7 +93,13 @@ export const createSyncHealth = (
         reset();
         return;
       }
-      const outage = now() - (firstFailureAt ?? now());
+
+      const at = now();
+      recoveringSince ??= at;
+      if (at - recoveringSince < SYNC_RECOVERY_CONFIRM_MS) return;
+
+      // Syncs stopped failing at the first success, not at this confirmation.
+      const outage = recoveringSince - (firstFailureAt ?? recoveringSince);
       reset();
       await logWarning(
         messageApp,
