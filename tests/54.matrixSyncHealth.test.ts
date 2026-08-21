@@ -15,7 +15,8 @@ const {
   createSyncHealth,
   SYNC_ALERT_AFTER_FAILURES,
   SYNC_ALERT_AFTER_MS,
-  SYNC_REALERT_COOLDOWN_MS
+  SYNC_REALERT_COOLDOWN_MS,
+  SYNC_RECOVERY_CONFIRM_MS
 } = await import("../utils/matrixSyncHealth.ts");
 
 const tokenError = () => ({
@@ -25,6 +26,11 @@ const tokenError = () => ({
 
 const alertTexts = () =>
   logErrorSpy.mock.calls.map((call) => (call as unknown as string[]).join(" "));
+
+const recoveryTexts = () =>
+  logWarningSpy.mock.calls.map((call) =>
+    (call as unknown as string[]).join(" ")
+  );
 
 let clock: number;
 
@@ -90,7 +96,7 @@ describe("sync health alerting", () => {
     expect(logErrorSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("reports recovery with the outage duration once sync succeeds", async () => {
+  it("reports recovery once syncs have held for the confirmation window", async () => {
     const health = healthWithClock();
 
     for (let i = 0; i < SYNC_ALERT_AFTER_FAILURES; i++) {
@@ -98,13 +104,66 @@ describe("sync health alerting", () => {
       await health.recordFailure(tokenError());
     }
     await health.recordSuccess();
+    expect(logWarningSpy).not.toHaveBeenCalled();
+
+    clock += SYNC_RECOVERY_CONFIRM_MS;
+    await health.recordSuccess();
 
     expect(logWarningSpy).toHaveBeenCalledTimes(1);
-    const recovery = (logWarningSpy.mock.calls[0] as unknown as string[]).join(
-      " "
-    );
-    expect(recovery).toContain("recovered");
-    expect(recovery).toMatch(/\dm/);
+    expect(recoveryTexts()[0]).toContain("recovered");
+  });
+
+  it("measures the outage up to the first success, not the confirmation", async () => {
+    const health = healthWithClock();
+
+    await health.recordFailure(tokenError());
+    clock += 4 * 60_000;
+    await health.recordFailure(tokenError());
+    await health.recordSuccess();
+
+    clock += SYNC_RECOVERY_CONFIRM_MS * 3;
+    await health.recordSuccess();
+
+    expect(recoveryTexts()[0]).toContain("recovered after 4m0s");
+  });
+
+  it("stays on one incident while sync flaps", async () => {
+    const health = healthWithClock();
+
+    // Two flap cycles, kept inside SYNC_REALERT_COOLDOWN_MS so the only thing
+    // that could speak up is the flapping itself.
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < SYNC_ALERT_AFTER_FAILURES; i++) {
+        clock += 30_000;
+        await health.recordFailure(tokenError());
+      }
+      await health.recordSuccess();
+      clock += SYNC_RECOVERY_CONFIRM_MS - 60_000;
+      await health.recordSuccess();
+    }
+
+    expect(logErrorSpy).toHaveBeenCalledTimes(1);
+    expect(logWarningSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the re-alert cooldown across a brief success", async () => {
+    const health = healthWithClock();
+
+    for (let i = 0; i < SYNC_ALERT_AFTER_FAILURES; i++) {
+      clock += 1000;
+      await health.recordFailure(tokenError());
+    }
+    expect(logErrorSpy).toHaveBeenCalledTimes(1);
+    const alertedAt = clock;
+
+    await health.recordSuccess();
+    clock = alertedAt + SYNC_REALERT_COOLDOWN_MS - 1;
+    await health.recordFailure(tokenError());
+    expect(logErrorSpy).toHaveBeenCalledTimes(1);
+
+    clock += 2;
+    await health.recordFailure(tokenError());
+    expect(logErrorSpy).toHaveBeenCalledTimes(2);
   });
 
   it("says nothing on a success that follows no alert", async () => {
@@ -117,7 +176,7 @@ describe("sync health alerting", () => {
     expect(logErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("starts a fresh streak after a recovery", async () => {
+  it("starts a fresh streak after a confirmed recovery", async () => {
     const health = healthWithClock();
 
     for (let i = 0; i < SYNC_ALERT_AFTER_FAILURES; i++) {
@@ -125,10 +184,18 @@ describe("sync health alerting", () => {
       await health.recordFailure(tokenError());
     }
     await health.recordSuccess();
+    clock += SYNC_RECOVERY_CONFIRM_MS;
+    await health.recordSuccess();
+
+    for (let i = 0; i < SYNC_ALERT_AFTER_FAILURES - 1; i++) {
+      clock += 1000;
+      await health.recordFailure(tokenError());
+    }
+    expect(logErrorSpy).toHaveBeenCalledTimes(1);
+
     clock += 1000;
     await health.recordFailure(tokenError());
-
-    expect(logErrorSpy).toHaveBeenCalledTimes(1);
+    expect(logErrorSpy).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a node network error readable", async () => {
@@ -176,7 +243,7 @@ describe("attachSyncHealth", () => {
     expect(alertTexts()[0]).toContain("boom");
   });
 
-  it("reports the recovery when a later sync succeeds", async () => {
+  it("reports the recovery once the syncs keep succeeding", async () => {
     let fail = true;
     const client = fakeClient(() =>
       fail ? Promise.reject(new Error("boom")) : Promise.resolve({})
@@ -189,6 +256,8 @@ describe("attachSyncHealth", () => {
     }
     fail = false;
     await client.doSync("s41");
+    clock += SYNC_RECOVERY_CONFIRM_MS;
+    await client.doSync("s42");
 
     expect(logWarningSpy).toHaveBeenCalledTimes(1);
   });
